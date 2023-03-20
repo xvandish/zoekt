@@ -482,6 +482,44 @@ type SearchResult struct {
 	LineFragments map[string]string
 }
 
+type SearchType string
+
+const (
+	SearchTypeDefault      SearchType = "default"
+	SearchTypeRepoOnly     SearchType = "repo_only"
+	SearchTypeFilenameOnly SearchType = "filename_only"
+)
+
+type SearchResultV2 struct {
+	// populated in normal and fileonly searches
+	// at some point, will probably want to breakout
+	// filename only matches into a seperate struct
+	Results SearchResult
+
+	// populated only in repo only searches
+	RepoResults RepoList
+
+	SearchType SearchType
+}
+
+func (sr *SearchResultV2) SizeBytes() (sz uint64) {
+	sz += sr.Results.SizeBytes()
+
+	// FileResults
+
+	// RepoResults
+	// TODO: get size of repoList
+	// sz += sliceHeaderBytes
+	// for _, f := range sr.RepoResults {
+	// 	sz += f.sizeBytes()
+	// }
+
+	// size of a string?
+	sz += uint64(len(sr.SearchType))
+
+	return sz
+}
+
 // SizeBytes is a best-effort estimate of the size of SearchResult in memory.
 // The estimate does not take alignment into account. The result is a lower
 // bound on the actual size in memory.

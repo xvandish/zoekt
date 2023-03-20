@@ -19,6 +19,7 @@ func JSONServer(searcher zoekt.Searcher) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/search", s.jsonSearch)
 	mux.HandleFunc("/list", s.jsonList)
+	mux.HandleFunc("/v2/search", s.jsonSearchV2)
 	return mux
 }
 
@@ -43,6 +44,18 @@ type jsonListArgs struct {
 
 type jsonListReply struct {
 	List *zoekt.RepoList
+}
+
+// to avoid nesting, we just directly reply with
+// a zoekt.SearchResultV2, instead of putting it inside
+// of Result
+// type jsonSearchV2Reply
+
+type jsonSearchV2Args struct {
+	Q          string
+	RepoIDs    *[]uint32
+	SearchOpts *zoekt.SearchOptions
+	ListOpts   *zoekt.ListOptions
 }
 
 func (s *jsonSearcher) jsonSearch(w http.ResponseWriter, req *http.Request) {
@@ -97,6 +110,96 @@ func (s *jsonSearcher) jsonSearch(w http.ResponseWriter, req *http.Request) {
 	}
 
 	err = json.NewEncoder(w).Encode(jsonSearchReply{searchResult})
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+}
+
+// identical it jsonSearch, except it detects the type of search and includes it in the response,
+// so frontend clients know what to expect.
+// additionally, if a search is repoOnly, it will call searcher.List instead of searcher.Search, much
+// like the built in zoekt/webserver
+func (s *jsonSearcher) jsonSearchV2(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	w.Header().Add("Content-Type", "application/json")
+
+	if req.Method != "POST" {
+		jsonError(w, http.StatusMethodNotAllowed, "Only POST is supported")
+		return
+	}
+
+	searchArgs := jsonSearchV2Args{}
+	err := json.NewDecoder(req.Body).Decode(&searchArgs)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if searchArgs.Q == "" {
+		jsonError(w, http.StatusBadRequest, "missing query")
+		return
+	}
+
+	q, err := query.Parse(searchArgs.Q)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// now, check if the query is a repo only query, if so, call list
+	repoOnly := true
+	query.VisitAtoms(q, func(q query.Q) {
+		_, ok := q.(*query.Repo)
+		repoOnly = repoOnly && ok
+	})
+
+	if repoOnly {
+		listResult, err := s.Searcher.List(ctx, q, searchArgs.ListOpts)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		err = json.NewEncoder(w).Encode(zoekt.SearchResultV2{
+			RepoResults: *listResult,
+			SearchType:  zoekt.SearchTypeRepoOnly,
+		})
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	// otherwise, this is a default, non-list search
+	if searchArgs.SearchOpts == nil {
+		searchArgs.SearchOpts = &zoekt.SearchOptions{}
+	}
+	if searchArgs.RepoIDs != nil {
+		q = query.NewAnd(q, query.NewRepoIDs(*searchArgs.RepoIDs...))
+	}
+
+	// Set a timeout if the user hasn't specified one.
+	if searchArgs.SearchOpts.MaxWallTime == 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+		defer cancel()
+	}
+
+	if err := CalculateDefaultSearchLimits(ctx, q, s.Searcher, searchArgs.SearchOpts); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	searchResult, err := s.Searcher.Search(ctx, q, searchArgs.SearchOpts)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	err = json.NewEncoder(w).Encode(zoekt.SearchResultV2{
+		Results:    *searchResult,
+		SearchType: zoekt.SearchTypeDefault,
+	})
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
