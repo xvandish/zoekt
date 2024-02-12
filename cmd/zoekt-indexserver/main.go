@@ -434,6 +434,13 @@ func deleteOrphanIndexes(ctx context.Context, indexDir, repoDir string, watchInt
 }
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	// work begins
+	ctx, span := tracer.Start(ctx, "main")
+	// end span once done with func
+	defer span.End()
+
 	var opts Options
 	opts.defineFlags()
 	dataDir := flag.String("data_dir",
@@ -445,25 +452,6 @@ func main() {
 	if *dataDir == "" {
 		log.Fatal("must set --data_dir")
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-
-	tracer := otel.Tracer("zoekt-indexserver")
-
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("dataDir", *dataDir),
-		attribute.String("indexDir", *indexDir),
-	}
-
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"main",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
 
 	// Automatically prepend our own path at the front, to minimize
 	// required configuration.

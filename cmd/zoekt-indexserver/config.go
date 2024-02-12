@@ -222,7 +222,6 @@ func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pend
 }
 
 func createGithubArgsMirrorAndFetchArgs(ctx context.Context, c ConfigEntry) []string {
-
 	// work begins
 	ctx, span := tracer.Start(ctx, "createGithubArgsMirrorAndFetchArgs")
 
