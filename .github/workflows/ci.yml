@@ -82,7 +82,7 @@ jobs:
   # We build a shared docker image called "zoekt". This is not pushed, but is
   # used for creating the indexserver and webserver images.
   docker:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/test-deploy'
     runs-on: ubuntu-latest
     needs:
       - "test"
