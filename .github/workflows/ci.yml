@@ -1,7 +1,7 @@
 on:
   push:
     branches:
-      - main
+      - test-deploy
   pull_request:
 name: CI
 jobs:
@@ -107,7 +107,7 @@ jobs:
       - name: build-push-webserver
         uses: docker/build-push-action@v1
         with:
-          repository: xvandish/zoekt-webserver
+          repository: Dextererials/zoekt-webserver
           tags: ${{ steps.version.outputs.value }},latest
           dockerfile: Dockerfile.webserver
           add_git_labels: "true"
@@ -118,7 +118,7 @@ jobs:
       - name: build-push-indexserver
         uses: docker/build-push-action@v1
         with:
-          repository: xvandish/zoekt-indexserver
+          repository: Dextererials/zoekt-indexserver
           tags: ${{ steps.version.outputs.value }},latest
           dockerfile: Dockerfile.indexserver
           add_git_labels: "true"
