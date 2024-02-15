@@ -33,13 +33,14 @@ import (
 	"strings"
 	"time"
 
-	"os/signal"
-
 	"github.com/xvandish/zoekt"
 	internalTracer "github.com/xvandish/zoekt/internal/tracer"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	sdkTrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const day = time.Hour * 24
@@ -434,8 +435,21 @@ func deleteOrphanIndexes(ctx context.Context, indexDir, repoDir string, watchInt
 }
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
+	ctx := context.Background()
+
+	exp, err := otlptracegrpc.New(ctx)
+	if err != nil {
+		panic(err)
+	}
+
+	tracerProvider := sdkTrace.NewTracerProvider(sdkTrace.WithBatcher(exp))
+	defer func() {
+		if err := tracerProvider.Shutdown(ctx); err != nil {
+			panic(err)
+		}
+	}()
+	otel.SetTracerProvider(tracerProvider)
+
 	// work begins
 	ctx, span := tracer.Start(ctx, "main")
 	// end span once done with func
