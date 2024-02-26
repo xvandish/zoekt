@@ -109,7 +109,7 @@ func readConfigURL(ctx context.Context, u string) ([]ConfigEntry, error) {
 	if isHTTP(ctx, u) {
 		rep, err := http.Get(u)
 		if err != nil {
-			span.AddEvent("error")
+			span.SetAttributes(attribute.Key("err").String(err.Error()))
 			return nil, err
 		}
 		defer rep.Body.Close()
