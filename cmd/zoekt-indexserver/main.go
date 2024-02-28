@@ -66,7 +66,7 @@ func loggedRun(ctx context.Context, cmd *exec.Cmd) (out, err []byte) {
 		attribute.String("cmd", cmd.String()),
 	}
 
-	// work begins
+	// start tracing
 	ctx, span := tracer.Start(
 		ctx,
 		"loggedRun",
