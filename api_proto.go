@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package zoekt // import "github.com/sourcegraph/zoekt"
+package zoekt // import "github.com/xvandish/zoekt"
 
 import (
 	"math/rand"
 	"reflect"
 
-	proto "github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
+	proto "github.com/xvandish/zoekt/grpc/protos/zoekt/webserver/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

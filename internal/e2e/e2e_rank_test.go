@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/sourcegraph/zoekt"
-	"github.com/sourcegraph/zoekt/build"
-	"github.com/sourcegraph/zoekt/internal/archive"
-	"github.com/sourcegraph/zoekt/query"
-	"github.com/sourcegraph/zoekt/shards"
+	"github.com/xvandish/zoekt"
+	"github.com/xvandish/zoekt/build"
+	"github.com/xvandish/zoekt/internal/archive"
+	"github.com/xvandish/zoekt/query"
+	"github.com/xvandish/zoekt/shards"
 )
 
 var update = flag.Bool("update", false, "update golden file")
@@ -44,7 +44,7 @@ func TestRanking(t *testing.T) {
 		"https://github.com/sourcegraph/cody/tree/vscode-v0.14.5",
 		// The commit before ranking e2e tests were added to avoid matching
 		// content inside our golden files.
-		"https://github.com/sourcegraph/zoekt/commit/ef907c2371176aa3f97713d5bf182983ef090c6a",
+		"https://github.com/xvandish/zoekt/commit/ef907c2371176aa3f97713d5bf182983ef090c6a",
 	}
 	q := func(query, target string) rankingQuery {
 		return rankingQuery{Query: query, Target: target}
@@ -66,7 +66,7 @@ func TestRanking(t *testing.T) {
 		q("r:cody sourcegraph url", "github.com/sourcegraph/cody/lib/shared/src/sourcegraph-api/graphql/client.ts"),
 
 		// zoekt
-		q("zoekt searcher", "github.com/sourcegraph/zoekt/api.go"),
+		q("zoekt searcher", "github.com/xvandish/zoekt/api.go"),
 
 		// exact phrases
 		q("assets are not configured for this binary", "github.com/sourcegraph/sourcegraph/ui/assets/assets.go"),

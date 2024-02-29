@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/dustin/go-humanize"
-	"github.com/sourcegraph/zoekt/grpc/grpcutil"
+	"github.com/xvandish/zoekt/grpc/grpcutil"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"

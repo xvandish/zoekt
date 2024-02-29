@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
+	v1 "github.com/xvandish/zoekt/grpc/protos/zoekt/webserver/v1"
 	"go.uber.org/atomic"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -21,9 +21,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	"github.com/sourcegraph/zoekt"
-	"github.com/sourcegraph/zoekt/internal/mockSearcher"
-	"github.com/sourcegraph/zoekt/query"
+	"github.com/xvandish/zoekt"
+	"github.com/xvandish/zoekt/internal/mockSearcher"
+	"github.com/xvandish/zoekt/query"
 )
 
 func TestClientServer(t *testing.T) {

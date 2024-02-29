@@ -15,4 +15,4 @@ jobs:
       # Run breaking change detection against the `main` branch
       - uses: bufbuild/buf-breaking-action@v1
         with:
-          against: 'https://github.com/sourcegraph/zoekt.git#branch=main'
+          against: 'https://github.com/xvandish/zoekt.git#branch=main'

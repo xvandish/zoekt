@@ -2,16 +2,16 @@ queryString: zoekt searcher
 query: (and substr:"zoekt" substr:"searcher")
 targetRank: 1
 
-**github.com/sourcegraph/zoekt/api.go**
+**github.com/xvandish/zoekt/api.go**
 824:type Searcher interface {
-15:package zoekt // import "github.com/sourcegraph/zoekt"
+15:package zoekt // import "github.com/xvandish/zoekt"
 697:	ZoektVersion          string
 hidden 13 more line matches
 
-github.com/sourcegraph/zoekt/rpc/internal/srv/srv.go
+github.com/xvandish/zoekt/rpc/internal/srv/srv.go
 33:type Searcher struct {
 34:	Searcher zoekt.Searcher
-7:	"github.com/sourcegraph/zoekt"
+7:	"github.com/xvandish/zoekt"
 hidden 9 more line matches
 
 github.com/sourcegraph/sourcegraph/doc/admin/observability/dashboards.md
@@ -32,10 +32,10 @@ github.com/sourcegraph/sourcegraph/internal/search/job/job.go
 75:	SearcherGRPCConnectionCache *defaults.ConnectionCache
 hidden 1 more line matches
 
-github.com/sourcegraph/zoekt/json/json.go
+github.com/xvandish/zoekt/json/json.go
 26:	Searcher zoekt.Searcher
 25:type jsonSearcher struct {
-9:	"github.com/sourcegraph/zoekt"
+9:	"github.com/xvandish/zoekt"
 hidden 16 more line matches
 
 hidden 119 more file matches

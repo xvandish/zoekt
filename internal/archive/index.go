@@ -8,8 +8,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/sourcegraph/zoekt"
-	"github.com/sourcegraph/zoekt/build"
+	"github.com/xvandish/zoekt"
+	"github.com/xvandish/zoekt/build"
 )
 
 // Options specify the archive specific indexing options.
