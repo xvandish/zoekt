@@ -62,6 +62,7 @@ func loggedRun(cmd *exec.Cmd) (out, err []byte) {
 	return outBuf.Bytes(), errBuf.Bytes()
 }
 
+// Options defines zoekt-indexserver options
 type Options struct {
 	cpuFraction          float64
 	cpuCount             int
