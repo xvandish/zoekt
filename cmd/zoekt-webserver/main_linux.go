@@ -1,14 +1,15 @@
 package main
 
 import (
+	"path"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/procfs"
 	sglog "github.com/sourcegraph/log"
-	"path"
 )
 
 func mustRegisterMemoryMapMetrics(logger sglog.Logger) {
-	logger = logger.Scoped("memoryMapMetrics", "")
+	logger = logger.Scoped("memoryMapMetrics")
 
 	// The memory map metrics are collected via /proc, which
 	// is only available on linux-based operating systems.

@@ -5,6 +5,7 @@ import (
 
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/query"
+	"github.com/xvandish/zoekt/stream"
 	"github.com/xvandish/zoekt/trace"
 )
 
@@ -43,7 +44,9 @@ func (s *typeRepoSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zo
 	tr, ctx := trace.New(ctx, "typeRepoSearcher.StreamSearch", "")
 	tr.LazyLog(q, true)
 	tr.LazyPrintf("opts: %+v", opts)
+	var stats zoekt.Stats
 	defer func() {
+		tr.LazyPrintf("stats: %+v", stats)
 		if err != nil {
 			tr.LazyPrintf("error: %v", err)
 			tr.SetError(err)
@@ -56,18 +59,22 @@ func (s *typeRepoSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zo
 		return err
 	}
 
-	return s.Streamer.StreamSearch(ctx, q, opts, sender)
+	return s.Streamer.StreamSearch(ctx, q, opts, stream.SenderFunc(func(event *zoekt.SearchResult) {
+		stats.Add(event.Stats)
+		sender.Send(event)
+	}))
 }
 
-func (s *typeRepoSearcher) List(ctx context.Context, r query.Q, opts *zoekt.ListOptions) (rl *zoekt.RepoList, err error) {
+func (s *typeRepoSearcher) List(ctx context.Context, q query.Q, opts *zoekt.ListOptions) (rl *zoekt.RepoList, err error) {
 	tr, ctx := trace.New(ctx, "typeRepoSearcher.List", "")
-	tr.LazyLog(r, true)
+	tr.LazyLog(q, true)
 	tr.LazyPrintf("opts: %s", opts)
 	defer func() {
 		if rl != nil {
 			tr.LazyPrintf("repos size: %d", len(rl.Repos))
+			tr.LazyPrintf("reposmap size: %d", len(rl.ReposMap))
 			tr.LazyPrintf("crashes: %d", rl.Crashes)
-			tr.LazyPrintf("minimal size : %d", len(rl.Minimal))
+			tr.LazyPrintf("stats: %+v", rl.Stats)
 		}
 		if err != nil {
 			tr.LazyPrintf("error: %v", err)
@@ -76,12 +83,12 @@ func (s *typeRepoSearcher) List(ctx context.Context, r query.Q, opts *zoekt.List
 		tr.Finish()
 	}()
 
-	r, err = s.eval(ctx, r)
+	q, err = s.eval(ctx, q)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.Streamer.List(ctx, r, opts)
+	return s.Streamer.List(ctx, q, opts)
 }
 
 func (s *typeRepoSearcher) eval(ctx context.Context, q query.Q) (query.Q, error) {

@@ -279,6 +279,9 @@ func executeMirror(cfg []ConfigEntry, repoDir string, parallelListApiReqs, paral
 				cmd.Args = append(cmd.Args, "-active")
 			}
 			cmd.Args = append(cmd.Args, c.GerritApiURL)
+		} else {
+			log.Printf("executeMirror: ignoring config, because it does not contain any valid repository definition: %v", c)
+			continue
 		}
 
 		stdout, stderr := loggedRun(cmd)

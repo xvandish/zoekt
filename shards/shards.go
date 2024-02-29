@@ -115,6 +115,14 @@ var (
 		Name: "zoekt_search_ngram_matches_total",
 		Help: "Total number of candidate matches as a result of searching ngrams",
 	})
+	metricSearchNgramLookupsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "zoekt_search_ngram_lookups_total",
+		Help: "Total number of times we accessed an ngram in the index",
+	})
+	metricSearchRegexpsConsideredTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "zoekt_search_regexps_considered_total",
+		Help: "Total number of times regexp was called on files that we evaluated",
+	})
 
 	metricListRunning = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "zoekt_list_running",
@@ -479,10 +487,6 @@ func selectRepoSet(shards []*rankedShard, q query.Q) ([]*rankedShard, query.Q) {
 func (ss *shardedSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.SearchOptions) (sr *zoekt.SearchResult, err error) {
 	tr, ctx := trace.New(ctx, "shardedSearcher.Search", "")
 	defer func() {
-		if sr != nil {
-			tr.LazyPrintf("num files: %d", len(sr.Files))
-			tr.LazyPrintf("stats: %+v", sr.Stats)
-		}
 		tr.Finish()
 	}()
 	ctx, cancel := context.WithCancel(ctx)
@@ -581,11 +585,11 @@ func (ss *shardedSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zo
 	// For streaming, the wrapping has to happen in the inverted order.
 	sender = copyFileSender(sender)
 
-	if opts.MaxDocDisplayCount > 0 {
+	if truncator, hasLimits := zoekt.NewDisplayTruncator(opts); hasLimits {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
-		sender = limitSender(cancel, sender, opts.MaxDocDisplayCount)
+		sender = limitSender(cancel, sender, truncator)
 	}
 
 	sender, flush := newFlushCollectSender(opts, sender)
@@ -610,8 +614,6 @@ func (ss *shardedSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zo
 // SearchResults it returns/streams out before calling done.
 func streamSearch(ctx context.Context, proc *process, q query.Q, opts *zoekt.SearchOptions, shards []*rankedShard, sender zoekt.Sender) (done func(), err error) {
 	tr, ctx := trace.New(ctx, "shardedSearcher.streamSearch", "")
-	tr.LazyLog(q, true)
-	tr.LazyPrintf("opts: %+v", opts)
 	overallStart := time.Now()
 	metricSearchRunning.Inc()
 	defer func() {
@@ -768,7 +770,6 @@ search:
 // We split by repository instead of by priority because it is easier to set
 // RepoURLs and LineFragments in zoekt.SearchResult.
 func sendByRepository(result *zoekt.SearchResult, opts *zoekt.SearchOptions, sender zoekt.Sender) {
-
 	if len(result.RepoURLs) <= 1 || len(result.Files) == 0 {
 		zoekt.SortFiles(result.Files)
 		sender.Send(result)
@@ -821,6 +822,8 @@ func observeMetrics(sr *zoekt.SearchResult) {
 	metricSearchShardsSkippedTotal.Add(float64(sr.Stats.ShardsSkipped))
 	metricSearchMatchCountTotal.Add(float64(sr.Stats.MatchCount))
 	metricSearchNgramMatchesTotal.Add(float64(sr.Stats.NgramMatches))
+	metricSearchNgramLookupsTotal.Add(float64(sr.Stats.NgramLookups))
+	metricSearchRegexpsConsideredTotal.Add(float64(sr.Stats.RegexpsConsidered))
 }
 
 func copySlice(src *[]byte) {
@@ -887,15 +890,13 @@ func listOneShard(ctx context.Context, s zoekt.Searcher, q query.Q, opts *zoekt.
 
 func (ss *shardedSearcher) List(ctx context.Context, r query.Q, opts *zoekt.ListOptions) (rl *zoekt.RepoList, err error) {
 	tr, ctx := trace.New(ctx, "shardedSearcher.List", "")
-	tr.LazyLog(r, true)
-	tr.LazyPrintf("opts: %s", opts)
 	metricListRunning.Inc()
 	defer func() {
 		metricListRunning.Dec()
 		if rl != nil {
 			tr.LazyPrintf("repos size: %d", len(rl.Repos))
+			tr.LazyPrintf("reposmap size: %d", len(rl.ReposMap))
 			tr.LazyPrintf("crashes: %d", rl.Crashes)
-			tr.LazyPrintf("minimal size: %d", len(rl.Minimal))
 		}
 		if err != nil {
 			tr.LazyPrintf("error: %v", err)
@@ -945,7 +946,6 @@ func (ss *shardedSearcher) List(ctx context.Context, r query.Q, opts *zoekt.List
 
 	agg := zoekt.RepoList{
 		Crashes:  stillLoadingCrashes,
-		Minimal:  map[uint32]*zoekt.MinimalRepoListEntry{},
 		ReposMap: zoekt.ReposMap{},
 	}
 
@@ -970,15 +970,11 @@ func (ss *shardedSearcher) List(ctx context.Context, r query.Q, opts *zoekt.List
 			}
 		}
 
-		for id, r := range r.rl.Minimal {
-			_, ok := agg.Minimal[id]
-			if !ok {
-				agg.Minimal[id] = r
-			}
-		}
-
 		for id, r := range r.rl.ReposMap {
-			agg.ReposMap[id] = r
+			_, ok := agg.ReposMap[id]
+			if !ok {
+				agg.ReposMap[id] = r
+			}
 		}
 	}
 
@@ -986,6 +982,13 @@ func (ss *shardedSearcher) List(ctx context.Context, r query.Q, opts *zoekt.List
 	for _, r := range uniq {
 		agg.Repos = append(agg.Repos, r)
 	}
+
+	// Only one of these fields is populated and in all cases the size of that
+	// field is the number of Repos.
+	//
+	// Note: we don't just add individual Stats.Repos since a repository can
+	// have multiple shards.
+	agg.Stats.Repos = len(uniq) + len(agg.ReposMap)
 
 	if isAll && len(agg.Repos) > 0 {
 		reportListAllMetrics(agg.Repos)

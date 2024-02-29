@@ -71,7 +71,7 @@ func TestBuildv16(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = os.WriteFile(wantP, data, 0644)
+		err = os.WriteFile(wantP, data, 0o644)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,6 +134,7 @@ func TestFlags(t *testing.T) {
 	ignored := []cmp.Option{
 		// depends on $PATH setting.
 		cmpopts.IgnoreFields(Options{}, "CTagsPath"),
+		cmpopts.IgnoreFields(Options{}, "ScipCTagsPath"),
 		cmpopts.IgnoreFields(Options{}, "changedOrRemovedFiles"),
 		cmpopts.IgnoreFields(zoekt.Repository{}, "priority"),
 	}
@@ -243,6 +244,9 @@ func TestDontCountContentOfSkippedFiles(t *testing.T) {
 	}
 	if len(b.todo) != 1 || b.todo[0].SkipReason == "" {
 		t.Fatalf("document should have been skipped")
+	}
+	if b.todo[0].Content != nil {
+		t.Fatalf("document content should be empty")
 	}
 	if b.size >= 100 {
 		t.Fatalf("content of skipped documents should not count towards shard size thresold")
@@ -482,7 +486,7 @@ func TestBuilder_DeltaShardsBuildsShouldErrorOnIndexOptionsMismatch(t *testing.T
 	}{
 		{
 			name:    "update option CTagsPath to non default",
-			options: func(options *Options) { options.CTagsPath = "ctags_updated_test" },
+			options: func(options *Options) { options.CTagsPath = "ctags_updated_test/universal-ctags" },
 		},
 		{
 			name:    "update option DisableCTags to non default",
@@ -733,7 +737,7 @@ func TestFindRepositoryMetadata(t *testing.T) {
 			o.SetDefaults()
 
 			// run test
-			got, gotOk, err := o.FindRepositoryMetadata()
+			got, _, gotOk, err := o.FindRepositoryMetadata()
 			if err != nil {
 				t.Errorf("received unexpected error: %v", err)
 				return
@@ -794,7 +798,7 @@ func TestIsLowPriority(t *testing.T) {
 func createTestShard(t *testing.T, indexDir string, r zoekt.Repository, numShards int, optFns ...func(options *Options)) []string {
 	t.Helper()
 
-	if err := os.MkdirAll(filepath.Dir(indexDir), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(indexDir), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -893,7 +897,6 @@ func createTestCompoundShard(t *testing.T, indexDir string, repositories []zoekt
 }
 
 func TestIgnoreSizeMax(t *testing.T) {
-
 	for _, test := range []struct {
 		name       string
 		largeFiles []string

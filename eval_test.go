@@ -24,6 +24,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/grafana/regexp"
 	"github.com/xvandish/zoekt/query"
 )
@@ -158,14 +159,14 @@ func TestSearch_ShardRepoMaxMatchCountOpt(t *testing.T) {
 
 	t.Run("stats", func(t *testing.T) {
 		got, want := sr.Stats, Stats{
-			ContentBytesLoaded: 2,
+			ContentBytesLoaded: 0,
 			FileCount:          2,
 			FilesConsidered:    2,
 			FilesSkipped:       2,
 			ShardsScanned:      1,
 			MatchCount:         2,
 		}
-		if diff := cmp.Diff(want, got); diff != "" {
+		if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(Stats{}, "MatchTreeConstruction", "MatchTreeSearch")); diff != "" {
 			t.Errorf("mismatch (-want, +got): %s", diff)
 		}
 	})
@@ -349,7 +350,8 @@ func TestGatherBranches(t *testing.T) {
 			{"main", "v1"},
 			{"bar", "v1"},
 			{"quz", "v1"},
-		}},
+		},
+	},
 		Document{Name: "f1", Content: content, Branches: []string{"foo", "bar", "quz"}},
 		Document{Name: "f2", Content: content, Branches: []string{"foo", "foo-2"}},
 		Document{Name: "f3", Content: content, Branches: []string{"main"}})
@@ -369,8 +371,8 @@ func TestGatherBranches(t *testing.T) {
 	}
 
 	want := map[string][]string{
-		"f1": []string{"foo", "quz"},
-		"f2": []string{"foo", "foo-2"},
+		"f1": {"foo", "quz"},
+		"f2": {"foo", "foo-2"},
 	}
 
 	if len(sr.Files) != 2 {

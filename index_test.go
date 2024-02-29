@@ -26,7 +26,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/grafana/regexp"
-	"github.com/kylelemons/godebug/pretty"
 
 	"github.com/xvandish/zoekt/query"
 )
@@ -370,23 +369,44 @@ func TestCaseFold(t *testing.T) {
 	})
 }
 
-func TestAndSearch(t *testing.T) {
-	b := testIndexBuilder(t, nil,
-		Document{Name: "f1", Content: []byte("x banana y")},
-		Document{Name: "f2", Content: []byte("x apple y")},
-		Document{Name: "f3", Content: []byte("x banana apple y")},
-	// ---------------------------------------0123456789012345
+// wordsAsSymbols finds all ASCII words in doc.Content which are longer than 2
+// chars. Those are then set as symbols.
+func wordsAsSymbols(doc Document) Document {
+	re := regexp.MustCompile(`\b\w{2,}\b`)
+	var symbols []DocumentSection
+	for _, match := range re.FindAllIndex(doc.Content, -1) {
+		symbols = append(symbols, DocumentSection{
+			Start: uint32(match[0]),
+			End:   uint32(match[1]),
+		})
+	}
+	doc.Symbols = symbols
+	return doc
+}
+
+func TestSearchStats(t *testing.T) {
+	ctx := context.Background()
+	searcher := searcherForTest(t, testIndexBuilder(t, nil,
+		wordsAsSymbols(Document{Name: "f1", Content: []byte("x banana y")}),
+		wordsAsSymbols(Document{Name: "f2", Content: []byte("x apple y")}),
+		wordsAsSymbols(Document{Name: "f3", Content: []byte("x banana apple y")}),
+		// --------------------------------------------------0123456789012345
+	))
+
+	andQuery := query.NewAnd(
+		&query.Substring{
+			Pattern: "banana",
+		},
+		&query.Substring{
+			Pattern: "apple",
+		},
 	)
 
 	t.Run("LineMatches", func(t *testing.T) {
-		sres := searchForTest(t, b, query.NewAnd(
-			&query.Substring{
-				Pattern: "banana",
-			},
-			&query.Substring{
-				Pattern: "apple",
-			},
-		))
+		sres, err := searcher.Search(ctx, andQuery, &SearchOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
 		matches := sres.Files
 		if len(matches) != 1 || len(matches[0].LineMatches) != 1 || len(matches[0].LineMatches[0].LineFragments) != 2 {
 			t.Fatalf("got %#v, want 1 match with 2 fragments", matches)
@@ -395,31 +415,12 @@ func TestAndSearch(t *testing.T) {
 		if matches[0].LineMatches[0].LineFragments[0].Offset != 2 || matches[0].LineMatches[0].LineFragments[1].Offset != 9 {
 			t.Fatalf("got %#v, want offsets 2,9", matches)
 		}
-
-		wantStats := Stats{
-			FilesLoaded:        1,
-			ContentBytesLoaded: 18,
-			IndexBytesLoaded:   8,
-			NgramMatches:       3, // we look at doc 1, because it's max(0,1) due to AND
-			MatchCount:         1,
-			FileCount:          1,
-			FilesConsidered:    2,
-			ShardsScanned:      1,
-		}
-		if diff := pretty.Compare(wantStats, sres.Stats); diff != "" {
-			t.Errorf("got stats diff %s", diff)
-		}
 	})
-
 	t.Run("ChunkMatches", func(t *testing.T) {
-		sres := searchForTest(t, b, query.NewAnd(
-			&query.Substring{
-				Pattern: "banana",
-			},
-			&query.Substring{
-				Pattern: "apple",
-			},
-		), chunkOpts)
+		sres, err := searcher.Search(ctx, andQuery, &chunkOpts)
+		if err != nil {
+			t.Fatal(err)
+		}
 		matches := sres.Files
 		if len(matches) != 1 || len(matches[0].ChunkMatches) != 1 || len(matches[0].ChunkMatches[0].Ranges) != 2 {
 			t.Fatalf("got %#v, want 1 chunk match with 2 ranges", matches)
@@ -428,19 +429,171 @@ func TestAndSearch(t *testing.T) {
 		if matches[0].ChunkMatches[0].Ranges[0].Start.ByteOffset != 2 || matches[0].ChunkMatches[0].Ranges[1].Start.ByteOffset != 9 {
 			t.Fatalf("got %#v, want offsets 2,9", matches)
 		}
+	})
+	t.Run("Stats", func(t *testing.T) {
+		cases := []struct {
+			Name string
+			Q    query.Q
+			Want Stats
+		}{{
+			Name: "and-query",
+			Q:    andQuery,
+			Want: Stats{
+				FilesLoaded:        1,
+				ContentBytesLoaded: 22,
+				IndexBytesLoaded:   8,
+				NgramMatches:       3, // we look at doc 1, because it's max(0,1) due to AND
+				NgramLookups:       104,
+				MatchCount:         2,
+				FileCount:          1,
+				FilesConsidered:    2,
+				ShardsScanned:      1,
+			},
+		}, {
+			Name: "one-trigram",
+			Q: &query.Substring{
+				Pattern:       "a y",
+				Content:       true,
+				CaseSensitive: true,
+			},
+			Want: Stats{
+				ContentBytesLoaded: 14,
+				IndexBytesLoaded:   1,
+				FileCount:          1,
+				FilesConsidered:    1,
+				FilesLoaded:        1,
+				ShardsScanned:      1,
+				MatchCount:         1,
+				NgramMatches:       1,
+				NgramLookups:       2, // once to lookup frequency then again to access posting list.
+			},
+		}, {
+			Name: "one-trigram-case-insensitive",
+			Q: &query.Substring{
+				Pattern: "a y",
+				Content: true,
+			},
+			Want: Stats{
+				ContentBytesLoaded: 14,
+				IndexBytesLoaded:   1,
+				FileCount:          1,
+				FilesConsidered:    1,
+				FilesLoaded:        1,
+				ShardsScanned:      1,
+				MatchCount:         1,
+				NgramMatches:       1,
+				NgramLookups:       8, // "a y" has 2**2 casings which we lookup twice.
+			},
+		}, {
+			Name: "one-trigram-pruned",
+			Q: &query.Substring{
+				Pattern:       "foo",
+				Content:       true,
+				CaseSensitive: true,
+			},
+			Want: Stats{
+				ShardsSkippedFilter: 1,
+				NgramLookups:        1, // only had to lookup once
+			},
+		}, {
+			Name: "one-trigram-branch-pruned",
+			Q: query.NewAnd(
+				&query.Substring{
+					Pattern:       "foo",
+					Content:       true,
+					CaseSensitive: true,
+				},
+				&query.Substring{
+					Pattern:       "a y",
+					Content:       true,
+					CaseSensitive: true,
+				},
+			),
+			Want: Stats{
+				IndexBytesLoaded:    1, // we created an iterator for "a y" before pruning.
+				ShardsSkippedFilter: 1,
+				NgramLookups:        3, // we lookedup "foo" once (1), but lookedup and created "a y" (2).
+			},
+		}, {
+			Name: "symbol-substr-nomatch",
+			Q: &query.Symbol{Expr: &query.Substring{
+				Pattern:       "banana apple",
+				Content:       true,
+				CaseSensitive: true,
+			}},
+			Want: Stats{
+				IndexBytesLoaded: 3,
+				FilesConsidered:  1, // important that we only check 1 file to ensure we are using the index
+				MatchCount:       0, // even though there is a match it doesn't align with a symbol
+				ShardsScanned:    1,
+				NgramMatches:     1,
+				NgramLookups:     12,
+			},
+		}, {
+			Name: "symbol-substr",
+			Q: &query.Symbol{Expr: &query.Substring{
+				Pattern:       "apple",
+				Content:       true,
+				CaseSensitive: true,
+			}},
+			Want: Stats{
+				ContentBytesLoaded: 35,
+				IndexBytesLoaded:   4,
+				FileCount:          2,
+				FilesConsidered:    2, // must be 2 to ensure we used the index
+				FilesLoaded:        2,
+				MatchCount:         2, // apple symbols is in two files
+				ShardsScanned:      1,
+				NgramMatches:       2,
+				NgramLookups:       5,
+			},
+		}, {
+			Name: "symbol-regexp-nomatch",
+			Q: &query.Symbol{Expr: &query.Regexp{
+				Regexp:        mustParseRE("^apple.banana$"),
+				Content:       true,
+				CaseSensitive: true,
+			}},
+			Want: Stats{
+				ContentBytesLoaded: 33, // we still have to run regex since "app" matches two documents
+				IndexBytesLoaded:   8,
+				FilesConsidered:    2, // important that we don't check 3 to ensure we are using the index
+				FilesLoaded:        2,
+				MatchCount:         0, // even though there is a match it doesn't align with a symbol
+				ShardsScanned:      1,
+				NgramMatches:       3,
+				NgramLookups:       11,
+			},
+		}, {
+			Name: "symbol-regexp",
+			Q: &query.Symbol{Expr: &query.Regexp{
+				Regexp:        mustParseRE("^app.e$"),
+				Content:       true,
+				CaseSensitive: true,
+			}},
+			Want: Stats{
+				ContentBytesLoaded: 35,
+				IndexBytesLoaded:   2,
+				FileCount:          2,
+				FilesConsidered:    2, // must be 2 to ensure we used the index
+				FilesLoaded:        2,
+				MatchCount:         2, // apple symbols is in two files
+				ShardsScanned:      1,
+				NgramMatches:       2,
+				NgramLookups:       2,
+			},
+		}}
 
-		wantStats := Stats{
-			FilesLoaded:        1,
-			ContentBytesLoaded: 18,
-			IndexBytesLoaded:   8,
-			NgramMatches:       3, // we look at doc 1, because it's max(0,1) due to AND
-			MatchCount:         2,
-			FileCount:          1,
-			FilesConsidered:    2,
-			ShardsScanned:      1,
-		}
-		if diff := pretty.Compare(wantStats, sres.Stats); diff != "" {
-			t.Errorf("got stats diff %s", diff)
+		for _, tc := range cases {
+			t.Run(tc.Name, func(t *testing.T) {
+				sres, err := searcher.Search(ctx, tc.Q, &chunkOpts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if diff := cmp.Diff(tc.Want, sres.Stats, cmpopts.IgnoreFields(Stats{}, "MatchTreeConstruction", "MatchTreeSearch")); diff != "" {
+					t.Errorf("unexpected Stats (-want +got):\n%s", diff)
+				}
+			})
 		}
 	})
 }
@@ -823,7 +976,6 @@ func TestSearchMatchAllRegexp(t *testing.T) {
 		if len(matches[0].LineMatches[0].Line) != 4 || len(matches[1].LineMatches[0].Line) != 4 {
 			t.Fatalf("want 4 chars in every file, got %#v", matches)
 		}
-
 	})
 
 	t.Run("ChunkMatches", func(t *testing.T) {
@@ -836,7 +988,6 @@ func TestSearchMatchAllRegexp(t *testing.T) {
 		if len(matches[0].ChunkMatches[0].Content) != 4 || len(matches[1].ChunkMatches[0].Content) != 4 {
 			t.Fatalf("want 4 chars in every file, got %#v", matches)
 		}
-
 	})
 }
 
@@ -1074,7 +1225,6 @@ func TestBranchReport(t *testing.T) {
 			t.Fatalf("got branches %q, want %q", f.Branches, branches)
 		}
 	})
-
 }
 
 func TestBranchVersions(t *testing.T) {
@@ -1686,8 +1836,9 @@ func TestListRepos(t *testing.T) {
 
 		for _, opts := range []*ListOptions{
 			nil,
-			{Minimal: false},
-			{Minimal: true},
+			{},
+			{Field: RepoListFieldRepos},
+			{Field: RepoListFieldReposMap},
 		} {
 			t.Run(fmt.Sprint(opts), func(t *testing.T) {
 				q := &query.Repo{Regexp: regexp.MustCompile("epo")}
@@ -1711,6 +1862,7 @@ func TestListRepos(t *testing.T) {
 						},
 					}},
 					Stats: RepoStats{
+						Repos:        1,
 						Documents:    4,
 						ContentBytes: 68,
 						Shards:       1,
@@ -1736,7 +1888,7 @@ func TestListRepos(t *testing.T) {
 				if err != nil {
 					t.Fatalf("List(%v): %v", q, err)
 				}
-				if len(res.Repos) != 0 || len(res.Minimal) != 0 {
+				if len(res.Repos) != 0 || len(res.ReposMap) != 0 {
 					t.Fatalf("got %v, want 0 matches", res)
 				}
 			})
@@ -1759,19 +1911,20 @@ func TestListRepos(t *testing.T) {
 		searcher := searcherForTest(t, b)
 
 		q := &query.Repo{Regexp: regexp.MustCompile("epo")}
-		res, err := searcher.List(context.Background(), q, &ListOptions{Minimal: true})
+		res, err := searcher.List(context.Background(), q, &ListOptions{Field: RepoListFieldReposMap})
 		if err != nil {
 			t.Fatalf("List(%v): %v", q, err)
 		}
 
 		want := &RepoList{
-			Minimal: map[uint32]*MinimalRepoListEntry{
+			ReposMap: ReposMap{
 				repo.ID: {
 					HasSymbols: repo.HasSymbols,
 					Branches:   repo.Branches,
 				},
 			},
 			Stats: RepoStats{
+				Repos:                      1,
 				Shards:                     1,
 				Documents:                  4,
 				IndexBytes:                 412,
@@ -1782,16 +1935,19 @@ func TestListRepos(t *testing.T) {
 			},
 		}
 
-		if diff := cmp.Diff(want, res); diff != "" {
+		ignored := []cmp.Option{
+			cmpopts.IgnoreFields(MinimalRepoListEntry{}, "IndexTimeUnix"),
+		}
+		if diff := cmp.Diff(want, res, ignored...); diff != "" {
 			t.Fatalf("mismatch (-want +got):\n%s", diff)
 		}
 
 		q = &query.Repo{Regexp: regexp.MustCompile("bla")}
-		res, err = searcher.List(context.Background(), q, &ListOptions{Minimal: true})
+		res, err = searcher.List(context.Background(), q, &ListOptions{Field: RepoListFieldReposMap})
 		if err != nil {
 			t.Fatalf("List(%v): %v", q, err)
 		}
-		if len(res.Repos) != 0 || len(res.Minimal) != 0 {
+		if len(res.Repos) != 0 || len(res.ReposMap) != 0 {
 			t.Fatalf("got %v, want 0 matches", res)
 		}
 	})
@@ -3044,15 +3200,30 @@ func TestSkipInvalidContent(t *testing.T) {
 	}
 }
 
-func TestCheckText(t *testing.T) {
+func TestDocChecker(t *testing.T) {
+	docChecker := DocChecker{}
+
+	// Test valid and invalid text
 	for _, text := range []string{"", "simple ascii", "símplé unicödé", "\uFEFFwith utf8 'bom'", "with \uFFFD unicode replacement char"} {
-		if err := CheckText([]byte(text), 20000); err != nil {
-			t.Errorf("CheckText(%q): %v", text, err)
+		if err := docChecker.Check([]byte(text), 20000, false); err != nil {
+			t.Errorf("Check(%q): %v", text, err)
 		}
 	}
 	for _, text := range []string{"zero\x00byte", "xx", "0123456789abcdefghi"} {
-		if err := CheckText([]byte(text), 15); err == nil {
-			t.Errorf("CheckText(%q) succeeded", text)
+		if err := docChecker.Check([]byte(text), 15, false); err == nil {
+			t.Errorf("Check(%q) succeeded", text)
+		}
+	}
+
+	// Test valid and invalid text with an allowed large file
+	for _, text := range []string{"0123456789abcdefghi", "qwertyuiopasdfghjklzxcvbnm"} {
+		if err := docChecker.Check([]byte(text), 15, true); err != nil {
+			t.Errorf("Check(%q): %v", text, err)
+		}
+	}
+	for _, text := range []string{"zero\x00byte", "xx"} {
+		if err := docChecker.Check([]byte(text), 15, true); err == nil {
+			t.Errorf("Check(%q) succeeded", text)
 		}
 	}
 }
@@ -3407,7 +3578,6 @@ func TestStats(t *testing.T) {
 		if diff := cmp.Diff(want, got, ignored...); diff != "" {
 			t.Fatalf("mismatch (-want +got):\n%s", diff)
 		}
-
 	})
 
 	t.Run("one simple shard", func(t *testing.T) {
@@ -3434,7 +3604,6 @@ func TestStats(t *testing.T) {
 		if diff := cmp.Diff(want, got, ignored...); diff != "" {
 			t.Fatalf("mismatch (-want +got):\n%s", diff)
 		}
-
 	})
 
 	t.Run("one compound shard", func(t *testing.T) {
@@ -3528,7 +3697,6 @@ func TestStats(t *testing.T) {
 		if diff := cmp.Diff(want, got, ignored...); diff != "" {
 			t.Fatalf("mismatch (-want +got):\n%s", diff)
 		}
-
 	})
 }
 

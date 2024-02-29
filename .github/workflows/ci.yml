@@ -3,11 +3,13 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 name: CI
 jobs:
   test:
     runs-on: ubuntu-latest
-    container: alpine:edge # go1.19 needs > alpine 3.15
+    # Pinned to alpine 3.19 to fix go version to 1.21. Remove this once Sourcegraph is on Go 1.22.
+    container: alpine:3.19
     steps:
       - name: checkout
         uses: actions/checkout@v3
@@ -15,11 +17,22 @@ jobs:
         run: apk add go git
       - name: install ctags
         run: ./install-ctags-alpine.sh
-      # Needed for submodule tests in gitindex
-      - name: git protocol.file.allow
-        run: git config --global --replace-all protocol.file.allow always
       - name: test
         run: go test ./...
+
+  fuzz-test:
+    name: fuzz test
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned a commit to make go version configurable.
+      # This should be safe to upgrade once this commit is in a released version:
+      # https://github.com/jidicula/go-fuzz-action/commit/23cc553941669144159507e2cccdbb4afc5b3076
+      - uses: jidicula/go-fuzz-action@0206b61afc603b665297621fa5e691b1447a5e57
+        with:
+          packages: 'github.com/sourcegraph/zoekt' # This is the package where the Protobuf round trip tests are defined
+          fuzz-time: 30s
+          fuzz-minimize-time: 1m
+          go-version: '1.21'
 
   shellcheck:
     name: shellcheck
@@ -95,17 +108,45 @@ jobs:
         id: version
         run: .github/workflows/docker-version.sh
 
-      - name: build-zoekt
-        uses: docker/build-push-action@v1
+      - name: docker-meta-webserver
+        id: meta-webserver
+        uses: docker/metadata-action@v3
         with:
-          repository: zoekt
-          tags: "latest"
-          add_git_labels: "true"
+          images: |
+            sourcegraph/zoekt-webserver
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha
+      - name: docker-meta-indexserver
+        id: meta-indexserver
+        uses: docker/metadata-action@v3
+        with:
+          images: |
+            sourcegraph/zoekt-indexserver
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: build-zoekt
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          tags: "zoekt:latest"
           push: "false"
-          build_args: VERSION=${{ steps.version.outputs.value }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: build-push-webserver
-        uses: docker/build-push-action@v1
+        uses: docker/build-push-action@v4
         with:
           repository: xvandish/zoekt-webserver
           tags: ${{ steps.version.outputs.value }},latest
@@ -116,7 +157,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: build-push-indexserver
-        uses: docker/build-push-action@v1
+        uses: docker/build-push-action@v4
         with:
           repository: xvandish/zoekt-indexserver
           tags: ${{ steps.version.outputs.value }},latest

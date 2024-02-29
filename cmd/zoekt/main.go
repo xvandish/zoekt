@@ -18,12 +18,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
 	"time"
 
+	"github.com/felixge/fgprof"
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/query"
 	"github.com/xvandish/zoekt/shards"
@@ -36,14 +38,21 @@ func displayMatches(files []zoekt.FileMatch, pat string, withRepo bool, list boo
 			r = f.Repository + "/"
 		}
 		if list {
-			fmt.Printf("%s%s\n", r, f.FileName)
+			fmt.Printf("%s%s%s\n", r, f.FileName, addTabIfNonEmpty(f.Debug))
 			continue
 		}
 
 		for _, m := range f.LineMatches {
-			fmt.Printf("%s%s:%d:%s\n", r, f.FileName, m.LineNumber, m.Line)
+			fmt.Printf("%s%s:%d:%s%s\n", r, f.FileName, m.LineNumber, m.Line, addTabIfNonEmpty(f.Debug))
 		}
 	}
+}
+
+func addTabIfNonEmpty(s string) string {
+	if s != "" {
+		return "\t" + s
+	}
+	return s
 }
 
 func loadShard(fn string, verbose bool) (zoekt.Searcher, error) {
@@ -76,15 +85,81 @@ func loadShard(fn string, verbose bool) (zoekt.Searcher, error) {
 	return s, nil
 }
 
+func profile(path string, duration time.Duration, start func(io.Writer) (stop func())) func() bool {
+	if path == "" {
+		return func() bool { return false }
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	t := time.Now()
+	stop := start(f)
+
+	return func() bool {
+		if time.Since(t) < duration {
+			return true
+		}
+		stop()
+		f.Close()
+		return false
+	}
+}
+
+func startCPUProfile(path string, duration time.Duration) func() bool {
+	return profile(path, duration, func(w io.Writer) func() {
+		if err := pprof.StartCPUProfile(w); err != nil {
+			log.Fatal(err)
+		}
+
+		return pprof.StopCPUProfile
+	})
+}
+
+func startFullProfile(path string, duration time.Duration) func() bool {
+	return profile(path, duration, func(w io.Writer) func() {
+		stop := fgprof.Start(w, fgprof.FormatPprof)
+
+		return func() {
+			if err := stop(); err != nil {
+				log.Fatal(err)
+			}
+		}
+	})
+}
+
+// experimental support for symbol queries. We just convert substring queries
+// into symbol queries. Needs to run after query.ExpandFileContent
+func toSymbolQuery(q query.Q) query.Q {
+	return query.Map(q, func(q query.Q) query.Q {
+		switch s := q.(type) {
+		case *query.Substring:
+			if s.Content {
+				return &query.Symbol{Expr: s}
+			}
+		case *query.Regexp:
+			if s.Content {
+				return &query.Symbol{Expr: s}
+			}
+		}
+		return q
+	})
+}
+
 func main() {
 	shard := flag.String("shard", "", "search in a specific shard")
 	index := flag.String("index_dir",
 		filepath.Join(os.Getenv("HOME"), ".zoekt"), "search for index files in `directory`")
 	cpuProfile := flag.String("cpu_profile", "", "write cpu profile to `file`")
+	fullProfile := flag.String("full_profile", "", "write full profile to `file`")
 	profileTime := flag.Duration("profile_time", time.Second, "run this long to gather stats.")
+	debug := flag.Bool("debug", false, "show debugscore output.")
 	verbose := flag.Bool("v", false, "print some background data")
 	withRepo := flag.Bool("r", false, "print the repo before the file name")
 	list := flag.Bool("l", false, "print matching filenames only")
+	sym := flag.Bool("sym", false, "do experimental symbol search")
 
 	flag.Usage = func() {
 		name := os.Args[0]
@@ -114,43 +189,34 @@ func main() {
 		log.Fatal(err)
 	}
 
-	query, err := query.Parse(pat)
+	q, err := query.Parse(pat)
 	if err != nil {
 		log.Fatal(err)
 	}
+	q = query.Map(q, query.ExpandFileContent)
+	if *sym {
+		q = toSymbolQuery(q)
+	}
+	q = query.Simplify(q)
 	if *verbose {
-		log.Println("query:", query)
+		log.Println("query:", q)
 	}
 
-	var sOpts zoekt.SearchOptions
-	sres, err := searcher.Search(context.Background(), query, &sOpts)
-	if *cpuProfile != "" {
-		// If profiling, do it another time so we measure with
-		// warm caches.
-		f, err := os.Create(*cpuProfile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer f.Close()
-		if *verbose {
-			log.Println("Displaying matches...")
-		}
-
-		t := time.Now()
-		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatal(err)
-		}
-		for {
-			sres, _ = searcher.Search(context.Background(), query, &sOpts)
-			if time.Since(t) > *profileTime {
-				break
-			}
-		}
-		pprof.StopCPUProfile()
+	sOpts := zoekt.SearchOptions{
+		DebugScore: *debug,
 	}
-
+	sres, err := searcher.Search(context.Background(), q, &sOpts)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// If profiling, do it another time so we measure with
+	// warm caches.
+	for run := startCPUProfile(*cpuProfile, *profileTime); run(); {
+		sres, _ = searcher.Search(context.Background(), q, &sOpts)
+	}
+	for run := startFullProfile(*fullProfile, *profileTime); run(); {
+		sres, _ = searcher.Search(context.Background(), q, &sOpts)
 	}
 
 	displayMatches(sres.Files, pat, *withRepo, *list)

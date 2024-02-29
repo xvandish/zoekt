@@ -20,21 +20,27 @@ import (
 )
 
 // candidateMatch is a candidate match for a substring.
+//
+// Note: a lot of these can be in memory, so think about fieldalignment when
+// modify the fields of this structure.
 type candidateMatch struct {
-	caseSensitive bool
-	fileName      bool
-	symbol        bool
-	symbolIdx     uint32
-
 	substrBytes   []byte
 	substrLowered []byte
 
-	file uint32
+	scoreWeight float64
+
+	file      uint32
+	symbolIdx uint32
 
 	// Offsets are relative to the start of the filename or file contents.
 	runeOffset  uint32
 	byteOffset  uint32
 	byteMatchSz uint32
+
+	// bools at end for struct field alignment
+	caseSensitive bool
+	fileName      bool
+	symbol        bool
 }
 
 // Matches content against the substring, and populates byteMatchSz on success
@@ -63,12 +69,19 @@ type matchIterator interface {
 	docIterator
 
 	candidates() []*candidateMatch
+
+	// updateStats is called twice. After matchtree construction and after
+	// searching is done. Implementations must take care to not report
+	// statistics twice.
 	updateStats(*Stats)
 }
 
 // noMatchTree is both matchIterator and matchTree that matches nothing.
 type noMatchTree struct {
 	Why string
+
+	// Stats captures the work done to create the noMatchTree.
+	Stats Stats
 }
 
 func (t *noMatchTree) String() string {
@@ -85,11 +98,14 @@ func (t *noMatchTree) nextDoc() uint32 {
 
 func (t *noMatchTree) prepare(uint32) {}
 
-func (t *noMatchTree) matches(cp *contentProvider, cost int, known map[matchTree]bool) (bool, bool) {
-	return false, true
+func (t *noMatchTree) matches(cp *contentProvider, cost int, known map[matchTree]bool) matchesState {
+	return matchesNone
 }
 
-func (t *noMatchTree) updateStats(*Stats) {}
+func (t *noMatchTree) updateStats(s *Stats) {
+	s.Add(t.Stats)
+	t.Stats = Stats{}
+}
 
 func (m *candidateMatch) String() string {
 	return fmt.Sprintf("%d:%d", m.file, m.runeOffset)
@@ -101,6 +117,9 @@ type ngramDocIterator struct {
 
 	iter hitIterator
 	ends []uint32
+
+	// ngramLookups is how many lookups we did to create this iterator.
+	ngramLookups int
 
 	// mutable
 	fileIdx    uint32
@@ -150,6 +169,9 @@ func (i *ngramDocIterator) prepare(nextDoc uint32) {
 func (i *ngramDocIterator) updateStats(s *Stats) {
 	i.iter.updateStats(s)
 	s.NgramMatches += i.matchCount
+	s.NgramLookups += i.ngramLookups
+	i.matchCount = 0
+	i.ngramLookups = 0
 }
 
 func (i *ngramDocIterator) candidates() []*candidateMatch {

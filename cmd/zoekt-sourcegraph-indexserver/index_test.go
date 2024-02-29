@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/sourcegraph/log/logtest"
-
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -158,7 +157,6 @@ func TestIterateIndexOptions_Fingerprint(t *testing.T) {
 				}
 			})
 		}
-
 	})
 
 	t.Run("REST", func(t *testing.T) {
@@ -322,13 +320,11 @@ func TestIterateIndexOptions_Fingerprint(t *testing.T) {
 				}
 			})
 		}
-
 	})
 }
 
 func TestGetIndexOptions(t *testing.T) {
 	t.Run("gRPC", func(t *testing.T) {
-
 		type testCase struct {
 			name     string
 			response *proto.SearchConfigurationResponse
@@ -466,7 +462,6 @@ func TestGetIndexOptions(t *testing.T) {
 		// Mimic our fingerprint API, which doesn't return anything if the
 		// repo hasn't changed.
 		t.Run("unchanged", func(t *testing.T) {
-
 			called := false
 			mockClient := &mockGRPCClient{
 				mockSearchConfiguration: func(_ context.Context, _ *proto.SearchConfigurationRequest, _ ...grpc.CallOption) (*proto.SearchConfigurationResponse, error) {
@@ -507,7 +502,6 @@ func TestGetIndexOptions(t *testing.T) {
 				t.Fatalf("expected no options, got %v", gotAtLeastOneOption)
 			}
 		})
-
 	})
 	t.Run("REST", func(t *testing.T) {
 		var response []byte
@@ -835,7 +829,6 @@ func TestIndex(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-
 			var got []string
 			runCmd := func(c *exec.Cmd) error {
 				cmd := strings.Join(c.Args, " ")
@@ -844,12 +837,12 @@ func TestIndex(t *testing.T) {
 				return nil
 			}
 
-			findRepositoryMetadata := func(args *indexArgs) (repository *zoekt.Repository, ok bool, err error) {
+			findRepositoryMetadata := func(args *indexArgs) (repository *zoekt.Repository, metadata *zoekt.IndexMetadata, ok bool, err error) {
 				if tc.mockRepositoryMetadata == nil {
 					return args.BuildOptions().FindRepositoryMetadata()
 				}
 
-				return tc.mockRepositoryMetadata, true, nil
+				return tc.mockRepositoryMetadata, &zoekt.IndexMetadata{}, true, nil
 			}
 
 			c := gitIndexConfig{
@@ -874,7 +867,6 @@ var splitargs = cmpopts.AcyclicTransformer("splitargs", func(cmd string) []strin
 type mockGRPCClient struct {
 	mockSearchConfiguration func(context.Context, *proto.SearchConfigurationRequest, ...grpc.CallOption) (*proto.SearchConfigurationResponse, error)
 	mockList                func(context.Context, *proto.ListRequest, ...grpc.CallOption) (*proto.ListResponse, error)
-	mockRepositoryRank      func(context.Context, *proto.RepositoryRankRequest, ...grpc.CallOption) (*proto.RepositoryRankResponse, error)
 	mockDocumentRanks       func(context.Context, *proto.DocumentRanksRequest, ...grpc.CallOption) (*proto.DocumentRanksResponse, error)
 	mockUpdateIndexStatus   func(context.Context, *proto.UpdateIndexStatusRequest, ...grpc.CallOption) (*proto.UpdateIndexStatusResponse, error)
 }
@@ -893,14 +885,6 @@ func (m *mockGRPCClient) List(ctx context.Context, in *proto.ListRequest, opts .
 	}
 
 	return nil, fmt.Errorf("mock RPC List not implemented")
-}
-
-func (m *mockGRPCClient) RepositoryRank(ctx context.Context, in *proto.RepositoryRankRequest, opts ...grpc.CallOption) (*proto.RepositoryRankResponse, error) {
-	if m.mockRepositoryRank != nil {
-		return m.mockRepositoryRank(ctx, in, opts...)
-	}
-
-	return nil, fmt.Errorf("mock RPC RepositoryRank not implemented")
 }
 
 func (m *mockGRPCClient) DocumentRanks(ctx context.Context, in *proto.DocumentRanksRequest, opts ...grpc.CallOption) (*proto.DocumentRanksResponse, error) {

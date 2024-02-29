@@ -241,6 +241,13 @@ func (s *Server) serveSearchErr(r *http.Request) (*ApiSearchResult, error) {
 		return nil, err
 	}
 
+	// Experimental: The query string and boost exact phrases of it.
+	if phraseBoost, err := strconv.ParseFloat(qvals.Get("phrase-boost"), 64); err == nil {
+		q = query.ExpirementalPhraseBoost(q, queryStr, query.ExperimentalPhraseBoostOptions{
+			Boost: phraseBoost,
+		})
+	}
+
 	repoOnly := true
 	query.VisitAtoms(q, func(q query.Q) {
 		_, ok := q.(*query.Repo)
@@ -349,13 +356,7 @@ func (s *Server) fetchStats(ctx context.Context) (*zoekt.RepoStats, error) {
 		return nil, err
 	}
 
-	stats = &zoekt.RepoStats{}
-	names := map[string]struct{}{}
-	for _, r := range repos.Repos {
-		stats.Add(&r.Stats)
-		names[r.Repository.Name] = struct{}{}
-	}
-	stats.Repos = len(names)
+	stats = &repos.Stats
 
 	s.lastStatsMu.Lock()
 	s.lastStatsTS = time.Now()
@@ -562,7 +563,6 @@ func (s *Server) servePrintErr(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	repoRe, err := regexp.Compile("^" + regexp.QuoteMeta(repoStr) + "$")
-
 	if err != nil {
 		return err
 	}

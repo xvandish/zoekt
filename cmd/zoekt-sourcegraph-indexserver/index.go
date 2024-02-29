@@ -20,13 +20,12 @@ import (
 
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/build"
+	"github.com/xvandish/zoekt/ctags"
 
 	sglog "github.com/sourcegraph/log"
 )
 
-// indexTimeout defines how long the indexserver waits before
-// killing an indexing job.
-const indexTimeout = 1*time.Hour + 30*time.Minute // an index should never take longer than an hour and a half
+const defaultIndexingTimeout = 1*time.Hour + 30*time.Minute
 
 // IndexOptions are the options that Sourcegraph can set via it's search
 // configuration endpoint.
@@ -67,6 +66,13 @@ type IndexOptions struct {
 
 	// Archived is true if the repository is archived.
 	Archived bool
+
+	// Map from language to scip-ctags, universal-ctags, or neither
+	LanguageMap ctags.LanguageMap
+
+	// The number of threads to use for indexing shards. Defaults to the number of available
+	// CPUs. If the server flag -cpu_fraction is set, then this value overrides it.
+	ShardConcurrency int32
 }
 
 // indexArgs represents the arguments we pass to zoekt-git-index
@@ -123,6 +129,8 @@ func (o *indexArgs) BuildOptions() *build.Options {
 		IsDelta:          o.UseDelta,
 
 		DocumentRanksVersion: o.DocumentRanksVersion,
+
+		LanguageMap: o.LanguageMap,
 	}
 }
 
@@ -156,11 +164,14 @@ type gitIndexConfig struct {
 	//
 	// The primary purpose of this configuration option is to be able to provide a stub
 	// implementation for this in our test suite. All other callers should use build.Options.FindRepositoryMetadata().
-	findRepositoryMetadata func(args *indexArgs) (repository *zoekt.Repository, ok bool, err error)
+	findRepositoryMetadata func(args *indexArgs) (repository *zoekt.Repository, metadata *zoekt.IndexMetadata, ok bool, err error)
+
+	// timeout defines how long the index server waits before killing an indexing job.
+	timeout time.Duration
 }
 
 func gitIndex(c gitIndexConfig, o *indexArgs, sourcegraph Sourcegraph, l sglog.Logger) error {
-	logger := l.Scoped("gitIndex", "fetch commits and then run zoekt-git-index against contents")
+	logger := l.Scoped("gitIndex")
 
 	if len(o.Branches) == 0 {
 		return errors.New("zoekt-git-index requires 1 or more branches")
@@ -176,8 +187,7 @@ func gitIndex(c gitIndexConfig, o *indexArgs, sourcegraph Sourcegraph, l sglog.L
 	}
 
 	buildOptions := o.BuildOptions()
-
-	ctx, cancel := context.WithTimeout(context.Background(), indexTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
 	gitDir, err := tmpGitDir(o.Name)
@@ -211,7 +221,7 @@ func gitIndex(c gitIndexConfig, o *indexArgs, sourcegraph Sourcegraph, l sglog.L
 		metricFetchDuration.WithLabelValues(success, name).Observe(fetchDuration.Seconds())
 	}()
 
-	var runFetch = func(branches []zoekt.RepositoryBranch) error {
+	runFetch := func(branches []zoekt.RepositoryBranch) error {
 		// We shallow fetch each commit specified in zoekt.Branches. This requires
 		// the server to have configured both uploadpack.allowAnySHA1InWant and
 		// uploadpack.allowFilter. (See gitservice.go in the Sourcegraph repository)
@@ -219,7 +229,8 @@ func gitIndex(c gitIndexConfig, o *indexArgs, sourcegraph Sourcegraph, l sglog.L
 			"-C", gitDir,
 			"-c", "protocol.version=2",
 			"-c", "http.extraHeader=X-Sourcegraph-Actor-UID: internal",
-			"fetch", "--depth=1", o.CloneURL}
+			"fetch", "--depth=1", o.CloneURL,
+		}
 
 		var commits []string
 		for _, b := range branches {
@@ -349,7 +360,7 @@ func gitIndex(c gitIndexConfig, o *indexArgs, sourcegraph Sourcegraph, l sglog.L
 				return err
 			}
 
-			if err := os.WriteFile(documentsRankFile, b, 0600); err != nil {
+			if err := os.WriteFile(documentsRankFile, b, 0o600); err != nil {
 				return fmt.Errorf("failed to write %s to disk: %w", documentsRankFile, err)
 			}
 
@@ -389,6 +400,14 @@ func gitIndex(c gitIndexConfig, o *indexArgs, sourcegraph Sourcegraph, l sglog.L
 		args = append(args, "-delta_threshold", strconv.FormatUint(o.DeltaShardNumberFallbackThreshold, 10))
 	}
 
+	if len(o.LanguageMap) > 0 {
+		var languageMap []string
+		for language, parser := range o.LanguageMap {
+			languageMap = append(languageMap, language+":"+ctags.ParserToString(parser))
+		}
+		args = append(args, "-language_map", strings.Join(languageMap, ","))
+	}
+
 	args = append(args, buildOptions.Args()...)
 	args = append(args, gitDir)
 
@@ -402,7 +421,7 @@ func gitIndex(c gitIndexConfig, o *indexArgs, sourcegraph Sourcegraph, l sglog.L
 }
 
 func priorBranches(c gitIndexConfig, o *indexArgs) ([]zoekt.RepositoryBranch, error) {
-	existingRepository, found, err := c.findRepositoryMetadata(o)
+	existingRepository, _, found, err := c.findRepositoryMetadata(o)
 	if err != nil {
 		return nil, fmt.Errorf("loading repository metadata: %w", err)
 	}

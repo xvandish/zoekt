@@ -40,7 +40,13 @@ func createSubmoduleRepo(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	script := `mkdir adir bdir
+	script := `
+# Fix fatal: transport 'file' not allowed
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=protocol.file.allow
+export GIT_CONFIG_VALUE_0=always
+
+mkdir adir bdir
 cd adir
 git init -b master
 mkdir subdir
@@ -255,7 +261,7 @@ func createSymlinkRepo(dir string) error {
 		return err
 	}
 	script := `mkdir adir bdir
-git init
+git init -b master
 git config user.email "you@example.com"
 git config user.name "Your Name"
 

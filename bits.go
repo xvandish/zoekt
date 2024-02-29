@@ -15,7 +15,9 @@
 package zoekt
 
 import (
+	"cmp"
 	"encoding/binary"
+	"math"
 	"sort"
 	"unicode"
 	"unicode/utf8"
@@ -106,10 +108,19 @@ func (n ngram) String() string {
 }
 
 type runeNgramOff struct {
-	ngram    ngram
-	byteSize uint32 // size of ngram
-	byteOff  uint32
-	runeOff  uint32
+	ngram ngram
+	// index is the original index inside of the returned array of splitNGrams
+	index uint32
+}
+
+func (a runeNgramOff) Compare(b runeNgramOff) int {
+	if a.ngram == b.ngram {
+		return cmp.Compare(a.index, b.index)
+	} else if a.ngram < b.ngram {
+		return -1
+	} else {
+		return 1
+	}
 }
 
 func splitNGrams(str []byte) []runeNgramOff {
@@ -120,9 +131,7 @@ func splitNGrams(str []byte) []runeNgramOff {
 	result := make([]runeNgramOff, 0, len(str))
 	var i uint32
 
-	chars := -1
 	for len(str) > 0 {
-		chars++
 		r, sz := utf8.DecodeRune(str)
 		str = str[sz:]
 		runeGram[0] = runeGram[1]
@@ -139,10 +148,8 @@ func splitNGrams(str []byte) []runeNgramOff {
 
 		ng := runesToNGram(runeGram)
 		result = append(result, runeNgramOff{
-			ngram:    ng,
-			byteSize: i - off[0],
-			byteOff:  off[0],
-			runeOff:  uint32(chars),
+			ngram: ng,
+			index: uint32(len(result)),
 		})
 	}
 	return result
@@ -395,4 +402,8 @@ func (m runeOffsetMap) lookup(runeOffset uint32) (uint32, uint32) {
 
 func (m runeOffsetMap) sizeBytes() int {
 	return 8 * len(m)
+}
+
+func epsilonEqualsOne(scoreWeight float64) bool {
+	return scoreWeight == 1 || math.Abs(scoreWeight-1.0) < 1e-9
 }

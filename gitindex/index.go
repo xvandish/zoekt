@@ -448,7 +448,7 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 				continue
 			}
 
-			return fmt.Errorf("getCommit: %w", err)
+			return fmt.Errorf("getCommit(%q, %q): %w", opts.BranchPrefix, b, err)
 		}
 
 		opts.BuildOptions.RepositoryDescription.Branches = append(opts.BuildOptions.RepositoryDescription.Branches, zoekt.RepositoryBranch{
@@ -562,59 +562,30 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 
 	var names []string
 	fileKeys := map[string][]fileKey{}
+	totalFiles := 0
+
 	for key := range repos {
 		n := key.FullPath()
 		fileKeys[n] = append(fileKeys[n], key)
 		names = append(names, n)
+		totalFiles++
 	}
 
 	sort.Strings(names)
 	names = uniq(names)
 
+	log.Printf("attempting to index %d total files", totalFiles)
 	for _, name := range names {
 		keys := fileKeys[name]
 
 		for _, key := range keys {
-			brs := branchMap[key]
-			blob, err := repos[key].Repo.BlobObject(key.ID)
+			doc, err := createDocument(key, repos, branchMap, ranks, opts.BuildOptions)
 			if err != nil {
 				return err
 			}
 
-			keyFullPath := key.FullPath()
-
-			if blob.Size > int64(opts.BuildOptions.SizeMax) && !opts.BuildOptions.IgnoreSizeMax(keyFullPath) {
-				if err := builder.Add(zoekt.Document{
-					SkipReason:        fmt.Sprintf("file size %d exceeds maximum size %d", blob.Size, opts.BuildOptions.SizeMax),
-					Name:              keyFullPath,
-					Branches:          brs,
-					SubRepositoryPath: key.SubRepoPath,
-				}); err != nil {
-					return err
-				}
-				continue
-			}
-
-			contents, err := blobContents(blob)
-			if err != nil {
-				return err
-			}
-
-			var pathRanks []float64
-			if len(ranks.Paths) > 0 {
-				// If the repository has ranking data, then store the file's rank.
-				pathRank := ranks.rank(keyFullPath)
-				pathRanks = []float64{pathRank}
-			}
-
-			if err := builder.Add(zoekt.Document{
-				SubRepositoryPath: key.SubRepoPath,
-				Name:              keyFullPath,
-				Content:           contents,
-				Branches:          brs,
-				Ranks:             pathRanks,
-			}); err != nil {
-				return fmt.Errorf("error adding document with name %s: %w", keyFullPath, err)
+			if err := builder.Add(doc); err != nil {
+				return fmt.Errorf("error adding document with name %s: %w", key.FullPath(), err)
 			}
 		}
 	}
@@ -684,7 +655,7 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 	}
 
 	// discover what commits we indexed during our last build
-	existingRepository, ok, err := options.BuildOptions.FindRepositoryMetadata()
+	existingRepository, _, ok, err := options.BuildOptions.FindRepositoryMetadata()
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to get repository metadata: %w", err)
 	}
@@ -915,6 +886,48 @@ func prepareNormalBuild(options Options, repository *git.Repository, branches []
 	}
 
 	return repos, branchMap, branchVersions, nil
+}
+
+func createDocument(key fileKey,
+	repos map[fileKey]BlobLocation,
+	branchMap map[fileKey][]string,
+	ranks repoPathRanks,
+	opts build.Options,
+) (zoekt.Document, error) {
+	blob, err := repos[key].Repo.BlobObject(key.ID)
+	if err != nil {
+		return zoekt.Document{}, err
+	}
+
+	keyFullPath := key.FullPath()
+	if blob.Size > int64(opts.SizeMax) && !opts.IgnoreSizeMax(keyFullPath) {
+		return zoekt.Document{
+			SkipReason:        fmt.Sprintf("file size %d exceeds maximum size %d", blob.Size, opts.SizeMax),
+			Name:              key.FullPath(),
+			Branches:          branchMap[key],
+			SubRepositoryPath: key.SubRepoPath,
+		}, nil
+	}
+
+	contents, err := blobContents(blob)
+	if err != nil {
+		return zoekt.Document{}, err
+	}
+
+	var pathRanks []float64
+	if len(ranks.Paths) > 0 {
+		// If the repository has ranking data, then store the file's rank.
+		pathRank := ranks.rank(keyFullPath)
+		pathRanks = []float64{pathRank}
+	}
+
+	return zoekt.Document{
+		SubRepositoryPath: key.SubRepoPath,
+		Name:              keyFullPath,
+		Content:           contents,
+		Branches:          branchMap[key],
+		Ranks:             pathRanks,
+	}, nil
 }
 
 func blobContents(blob *object.Blob) ([]byte, error) {

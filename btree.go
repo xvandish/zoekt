@@ -237,10 +237,12 @@ func (n *innerNode) maybeSplit(opts btreeOpts) (left node, right node, newKey ng
 	}
 	return &innerNode{
 			keys:     append(make([]ngram, 0, opts.v-1), n.keys[0:opts.v-1]...),
-			children: append(make([]node, 0, opts.v), n.children[:opts.v]...)},
+			children: append(make([]node, 0, opts.v), n.children[:opts.v]...),
+		},
 		&innerNode{
 			keys:     append(make([]ngram, 0, (2*opts.v)-1), n.keys[opts.v:]...),
-			children: append(make([]node, 0, 2*opts.v), n.children[opts.v:]...)},
+			children: append(make([]node, 0, 2*opts.v), n.children[opts.v:]...),
+		},
 		n.keys[opts.v-1],
 		true
 }
@@ -289,6 +291,7 @@ type btreeIndex struct {
 	postingIndex simpleSection
 }
 
+// SizeBytes returns how much memory this structure uses in the heap.
 func (b btreeIndex) SizeBytes() (sz int) {
 	// btree
 	if b.bt != nil {
@@ -401,6 +404,9 @@ func (b btreeIndex) getBucket(bucketIndex int) (off uint32, sz uint32) {
 	return
 }
 
+// DumpMap is a debug method which returns the btree as an in-memory
+// representation. This is how zoekt represents the ngram index in
+// google/zoekt.
 func (b btreeIndex) DumpMap() map[ngram]simpleSection {
 	if b.bt == nil {
 		return nil

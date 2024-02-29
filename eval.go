@@ -21,7 +21,9 @@ import (
 	"math"
 	"regexp/syntax"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	enry_data "github.com/go-enry/go-enry/v2/data"
 	"github.com/grafana/regexp"
@@ -31,11 +33,27 @@ import (
 
 const maxUInt16 = 0xffff
 
-func (m *FileMatch) addScore(what string, s float64, debugScore bool) {
-	if debugScore {
-		m.Debug += fmt.Sprintf("%s:%.2f, ", what, s)
+// addScore increments the score of the FileMatch by the computed score. If
+// debugScore is true, it also adds a debug string to the FileMatch. If raw is
+// -1, it is ignored. Otherwise, it is added to the debug string.
+func (m *FileMatch) addScore(what string, computed float64, raw float64, debugScore bool) {
+	if computed != 0 && debugScore {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s", what)
+		if raw != -1 {
+			fmt.Fprintf(&b, "(%s)", strconv.FormatFloat(raw, 'f', -1, 64))
+		}
+		fmt.Fprintf(&b, ":%.2f, ", computed)
+		m.Debug += b.String()
 	}
-	m.Score += s
+	m.Score += computed
+}
+
+func (m *FileMatch) addKeywordScore(score float64, sumTf float64, L float64, debugScore bool) {
+	if debugScore {
+		m.Debug += fmt.Sprintf("keyword-score:%.2f (sum-tf: %.2f, length-ratio: %.2f)", score, sumTf, L)
+	}
+	m.Score += score
 }
 
 // simplifyMultiRepo takes a query and a predicate. It returns Const(true) if all
@@ -141,6 +159,8 @@ func (o *SearchOptions) SetDefaults() {
 }
 
 func (d *indexData) Search(ctx context.Context, q query.Q, opts *SearchOptions) (sr *SearchResult, err error) {
+	timer := newTimer()
+
 	copyOpts := *opts
 	opts = &copyOpts
 	opts.SetDefaults()
@@ -169,15 +189,19 @@ func (d *indexData) Search(ctx context.Context, q query.Q, opts *SearchOptions) 
 
 	q = query.Map(q, query.ExpandFileContent)
 
-	mt, err := d.newMatchTree(q)
+	mt, err := d.newMatchTree(q, matchTreeOpt{})
 	if err != nil {
 		return nil, err
 	}
+
+	// Capture the costs of construction before pruning
+	updateMatchTreeStats(mt, &res.Stats)
 
 	mt, err = pruneMatchTree(mt)
 	if err != nil {
 		return nil, err
 	}
+	res.Stats.MatchTreeConstruction = timer.Elapsed()
 	if mt == nil {
 		res.Stats.ShardsSkippedFilter++
 		return &res, nil
@@ -264,18 +288,20 @@ nextFileMatch:
 		cp.setDocument(nextDoc)
 
 		known := make(map[matchTree]bool)
-
 		md := d.repoMetaData[d.repos[nextDoc]]
 
 		for cost := costMin; cost <= costMax; cost++ {
-			v, ok := mt.matches(cp, cost, known)
-			if ok && !v {
+			switch evalMatchTree(cp, cost, known, mt) {
+			case matchesRequiresHigherCost:
+				if cost == costMax {
+					log.Panicf("did not decide. Repo %s, doc %d, known %v",
+						md.Name, nextDoc, known)
+				}
+			case matchesFound:
+				// could short-circuit now, but we want to run higher costs to
+				// potentially find higher ranked matches.
+			case matchesNone:
 				continue nextFileMatch
-			}
-
-			if cost == costMax && !ok {
-				log.Panicf("did not decide. Repo %s, doc %d, known %v",
-					md.Name, nextDoc, known)
 			}
 		}
 
@@ -306,10 +332,9 @@ nextFileMatch:
 			}
 		}
 
-		atomMatchCount := 0
-		visitMatches(mt, known, func(mt matchTree) {
-			atomMatchCount++
-		})
+		// Important invariant for performance: finalCands is sorted by offset and
+		// non-overlapping. gatherMatches respects this invariant and all later
+		// transformations respect this.
 		shouldMergeMatches := !opts.ChunkMatches
 		finalCands := gatherMatches(mt, known, shouldMergeMatches)
 
@@ -334,63 +359,12 @@ nextFileMatch:
 			fileMatch.LineMatches = cp.fillMatches(finalCands, opts.NumContextLines, fileMatch.Language, opts.DebugScore)
 		}
 
-		maxFileScore := 0.0
-		repetitions := 0
-		for i := range fileMatch.LineMatches {
-			if maxFileScore < fileMatch.LineMatches[i].Score {
-				maxFileScore = fileMatch.LineMatches[i].Score
-				repetitions = 0
-			} else if maxFileScore == fileMatch.LineMatches[i].Score {
-				repetitions += 1
-			}
-
-			// Order by ordering in file.
-			fileMatch.LineMatches[i].Score += scoreLineOrderFactor * (1.0 - (float64(i) / float64(len(fileMatch.LineMatches))))
+		if opts.UseKeywordScoring {
+			d.scoreFileUsingBM25(&fileMatch, nextDoc, finalCands, opts)
+		} else {
+			// Use the standard, non-experimental scoring method by default
+			d.scoreFile(&fileMatch, nextDoc, mt, known, opts)
 		}
-
-		for i := range fileMatch.ChunkMatches {
-			if maxFileScore < fileMatch.ChunkMatches[i].Score {
-				maxFileScore = fileMatch.ChunkMatches[i].Score
-			}
-
-			// Order by ordering in file.
-			fileMatch.ChunkMatches[i].Score += scoreLineOrderFactor * (1.0 - (float64(i) / float64(len(fileMatch.ChunkMatches))))
-		}
-
-		// Maintain ordering of input files. This
-		// strictly dominates the in-file ordering of
-		// the matches.
-		fileMatch.addScore("fragment", maxFileScore, opts.DebugScore)
-
-		// Prefer docs with several top-scored matches.
-		fileMatch.addScore("repetition-boost", scoreRepetitionFactor*float64(repetitions), opts.DebugScore)
-
-		// atom-count boosts files with matches from more than 1 atom. The
-		// maximum boost is scoreFactorAtomMatch.
-		if atomMatchCount > 0 {
-			fileMatch.addScore("atom", (1.0-1.0/float64(atomMatchCount))*scoreFactorAtomMatch, opts.DebugScore)
-		}
-
-		if opts.UseDocumentRanks && len(d.ranks) > int(nextDoc) {
-			weight := scoreFileRankFactor
-			if opts.DocumentRanksWeight > 0.0 {
-				weight = opts.DocumentRanksWeight
-			}
-
-			ranks := d.ranks[nextDoc]
-			// The ranks slice always contains one entry representing the file rank (unless it's empty since the
-			// file doesn't have a rank). This is left over from when documents could have multiple rank signals,
-			// and we plan to clean this up.
-			if len(ranks) > 0 {
-				// The file rank represents a log (base 2) count. The log ranks should be bounded at 32, but we
-				// cap it just in case to ensure it falls in the range [0, 1].
-				normalized := math.Min(1.0, ranks[0]/32.0)
-				fileMatch.addScore("file-rank", weight*normalized, opts.DebugScore)
-			}
-		}
-
-		fileMatch.addScore("doc-order", scoreFileOrderFactor*(1.0-float64(nextDoc)/float64(len(d.boundaries))), opts.DebugScore)
-		fileMatch.addScore("repo-rank", scoreRepoRankFactor*float64(md.Rank)/maxUInt16, opts.DebugScore)
 
 		fileMatch.Branches = d.gatherBranches(nextDoc, mt, known, opts.SawpHEADInBranchesWithRevParsedName)
 		sortMatchesByScore(fileMatch.LineMatches)
@@ -431,19 +405,121 @@ nextFileMatch:
 		}
 	}
 
-	visitMatchTree(mt, func(mt matchTree) {
-		if atom, ok := mt.(interface{ updateStats(*Stats) }); ok {
-			atom.updateStats(&res.Stats)
-		}
-	})
+	// Update stats based on work done during document search.
+	updateMatchTreeStats(mt, &res.Stats)
 
 	// If document ranking is enabled, then we can rank and truncate the files to save memory.
-	if limit := opts.MaxDocDisplayCount; opts.UseDocumentRanks && limit > 0 && limit < len(res.Files) {
-		SortFiles(res.Files)
-		res.Files = res.Files[:limit]
+	if opts.UseDocumentRanks {
+		res.Files = SortAndTruncateFiles(res.Files, opts)
 	}
 
+	res.Stats.MatchTreeSearch = timer.Elapsed()
+
 	return &res, nil
+}
+
+// scoreFile computes a score for the file match using various scoring signals, like
+// whether there's an exact match on a symbol, the number of query clauses that matched, etc.
+func (d *indexData) scoreFile(fileMatch *FileMatch, doc uint32, mt matchTree, known map[matchTree]bool, opts *SearchOptions) {
+	atomMatchCount := 0
+	visitMatchAtoms(mt, known, func(mt matchTree) {
+		atomMatchCount++
+	})
+
+	addScore := func(what string, computed float64) {
+		fileMatch.addScore(what, computed, -1, opts.DebugScore)
+	}
+
+	// atom-count boosts files with matches from more than 1 atom. The
+	// maximum boost is scoreFactorAtomMatch.
+	if atomMatchCount > 0 {
+		fileMatch.addScore("atom", (1.0-1.0/float64(atomMatchCount))*scoreFactorAtomMatch, float64(atomMatchCount), opts.DebugScore)
+	}
+
+	maxFileScore := 0.0
+	for i := range fileMatch.LineMatches {
+		if maxFileScore < fileMatch.LineMatches[i].Score {
+			maxFileScore = fileMatch.LineMatches[i].Score
+		}
+
+		// Order by ordering in file.
+		fileMatch.LineMatches[i].Score += scoreLineOrderFactor * (1.0 - (float64(i) / float64(len(fileMatch.LineMatches))))
+	}
+
+	for i := range fileMatch.ChunkMatches {
+		if maxFileScore < fileMatch.ChunkMatches[i].Score {
+			maxFileScore = fileMatch.ChunkMatches[i].Score
+		}
+
+		// Order by ordering in file.
+		fileMatch.ChunkMatches[i].Score += scoreLineOrderFactor * (1.0 - (float64(i) / float64(len(fileMatch.ChunkMatches))))
+	}
+
+	// Maintain ordering of input files. This
+	// strictly dominates the in-file ordering of
+	// the matches.
+	addScore("fragment", maxFileScore)
+
+	if opts.UseDocumentRanks && len(d.ranks) > int(doc) {
+		weight := scoreFileRankFactor
+		if opts.DocumentRanksWeight > 0.0 {
+			weight = opts.DocumentRanksWeight
+		}
+
+		ranks := d.ranks[doc]
+		// The ranks slice always contains one entry representing the file rank (unless it's empty since the
+		// file doesn't have a rank). This is left over from when documents could have multiple rank signals,
+		// and we plan to clean this up.
+		if len(ranks) > 0 {
+			// The file rank represents a log (base 2) count. The log ranks should be bounded at 32, but we
+			// cap it just in case to ensure it falls in the range [0, 1].
+			normalized := math.Min(1.0, ranks[0]/32.0)
+			addScore("file-rank", weight*normalized)
+		}
+	}
+
+	md := d.repoMetaData[d.repos[doc]]
+	addScore("doc-order", scoreFileOrderFactor*(1.0-float64(doc)/float64(len(d.boundaries))))
+	addScore("repo-rank", scoreRepoRankFactor*float64(md.Rank)/maxUInt16)
+
+	if opts.DebugScore {
+		fileMatch.Debug = strings.TrimSuffix(fileMatch.Debug, ", ")
+	}
+}
+
+// scoreFileUsingBM25 computes a score for the file match using an approximation to BM25, the most common scoring
+// algorithm for keyword search: https://en.wikipedia.org/wiki/Okapi_BM25. It implements all parts of the formula
+// except inverse document frequency (idf), since we don't have access to global term frequency statistics.
+//
+// This scoring strategy ignores all other signals including document ranks. This keeps things simple for now,
+// since BM25 is not normalized and can be tricky to combine with other scoring signals.
+func (d *indexData) scoreFileUsingBM25(fileMatch *FileMatch, doc uint32, cands []*candidateMatch, opts *SearchOptions) {
+	// Treat each candidate match as a term and compute the frequencies. For now, ignore case
+	// sensitivity and treat filenames and symbols the same as content.
+	termFreqs := map[string]int{}
+	for _, cand := range cands {
+		term := string(cand.substrLowered)
+		termFreqs[term]++
+	}
+
+	// Compute the file length ratio. Usually the calculation would be based on terms, but using
+	// bytes should work fine, as we're just computing a ratio.
+	fileLength := float64(d.boundaries[doc+1] - d.boundaries[doc])
+	numFiles := len(d.boundaries)
+	averageFileLength := float64(d.boundaries[numFiles-1]) / float64(numFiles)
+	L := fileLength / averageFileLength
+
+	// Use standard parameter defaults (used in Lucene and academic papers)
+	k, b := 1.2, 0.75
+	sumTf := 0.0 // Just for debugging
+	score := 0.0
+	for _, freq := range termFreqs {
+		tf := float64(freq)
+		sumTf += tf
+		score += ((k + 1.0) * tf) / (k*(1.0-b+b*L) + tf)
+	}
+
+	fileMatch.addKeywordScore(score, sumTf, L, opts.DebugScore)
 }
 
 func addRepo(res *SearchResult, repo *Repository) {
@@ -463,7 +539,20 @@ type sortByOffsetSlice []*candidateMatch
 func (m sortByOffsetSlice) Len() int      { return len(m) }
 func (m sortByOffsetSlice) Swap(i, j int) { m[i], m[j] = m[j], m[i] }
 func (m sortByOffsetSlice) Less(i, j int) bool {
+	if m[i].byteOffset == m[j].byteOffset { // tie break if same offset
+		// Prefer longer candidates if starting at same position
+		return m[i].byteMatchSz > m[j].byteMatchSz
+	}
 	return m[i].byteOffset < m[j].byteOffset
+}
+
+// setScoreWeight is a helper used by gatherMatches to set the weight based on
+// the score weight of the matchTree.
+func setScoreWeight(scoreWeight float64, cm []*candidateMatch) []*candidateMatch {
+	for _, m := range cm {
+		m.scoreWeight = scoreWeight
+	}
+	return cm
 }
 
 // Gather matches from this document. This never returns a mixture of
@@ -476,18 +565,18 @@ func (m sortByOffsetSlice) Less(i, j int) bool {
 // but adjacent matches will remain.
 func gatherMatches(mt matchTree, known map[matchTree]bool, merge bool) []*candidateMatch {
 	var cands []*candidateMatch
-	visitMatches(mt, known, func(mt matchTree) {
+	visitMatches(mt, known, 1, func(mt matchTree, scoreWeight float64) {
 		if smt, ok := mt.(*substrMatchTree); ok {
-			cands = append(cands, smt.current...)
+			cands = append(cands, setScoreWeight(scoreWeight, smt.current)...)
 		}
 		if rmt, ok := mt.(*regexpMatchTree); ok {
-			cands = append(cands, rmt.found...)
+			cands = append(cands, setScoreWeight(scoreWeight, rmt.found)...)
 		}
 		if rmt, ok := mt.(*wordMatchTree); ok {
-			cands = append(cands, rmt.found...)
+			cands = append(cands, setScoreWeight(scoreWeight, rmt.found)...)
 		}
 		if smt, ok := mt.(*symbolRegexpMatchTree); ok {
-			cands = append(cands, smt.found...)
+			cands = append(cands, setScoreWeight(scoreWeight, smt.found)...)
 		}
 	})
 
@@ -512,6 +601,7 @@ func gatherMatches(mt matchTree, known map[matchTree]bool, merge bool) []*candid
 		// are non-overlapping.
 		sort.Sort((sortByOffsetSlice)(cands))
 		res = cands[:0]
+		mergeRun := 1
 		for i, c := range cands {
 			if i == 0 {
 				res = append(res, c)
@@ -521,10 +611,23 @@ func gatherMatches(mt matchTree, known map[matchTree]bool, merge bool) []*candid
 			lastEnd := last.byteOffset + last.byteMatchSz
 			end := c.byteOffset + c.byteMatchSz
 			if lastEnd >= c.byteOffset {
+				mergeRun++
+
+				// Average out the score across the merged candidates. Only do it if
+				// we are boosting to avoid floating point funkiness in the normal
+				// case.
+				if !(epsilonEqualsOne(last.scoreWeight) && epsilonEqualsOne(c.scoreWeight)) {
+					last.scoreWeight = ((last.scoreWeight * float64(mergeRun-1)) + c.scoreWeight) / float64(mergeRun)
+				}
+
+				// latest candidate goes further, update our end
 				if end > lastEnd {
 					last.byteMatchSz = end - last.byteOffset
 				}
+
 				continue
+			} else {
+				mergeRun = 1
 			}
 
 			res = append(res, c)
@@ -571,7 +674,7 @@ func (d *indexData) branchIndex(docID uint32) int {
 // returns all branches containing docID.
 func (d *indexData) gatherBranches(docID uint32, mt matchTree, known map[matchTree]bool, swapHEAD bool) []string {
 	var mask uint64
-	visitMatches(mt, known, func(mt matchTree) {
+	visitMatchAtoms(mt, known, func(mt matchTree) {
 		bq, ok := mt.(*branchQueryMatchTree)
 		if !ok {
 			return
@@ -649,8 +752,6 @@ func (d *indexData) List(ctx context.Context, q query.Q, opts *ListOptions) (rl 
 	switch field {
 	case RepoListFieldRepos:
 		l.Repos = make([]*RepoListEntry, 0, len(d.repoListEntry))
-	case RepoListFieldMinimal:
-		l.Minimal = make(map[uint32]*MinimalRepoListEntry, len(d.repoListEntry))
 	case RepoListFieldReposMap:
 		l.ReposMap = make(ReposMap, len(d.repoListEntry))
 	}
@@ -675,19 +776,19 @@ func (d *indexData) List(ctx context.Context, q query.Q, opts *ListOptions) (rl 
 		switch field {
 		case RepoListFieldRepos:
 			l.Repos = append(l.Repos, rle)
-		case RepoListFieldMinimal:
-			l.Minimal[rle.Repository.ID] = &MinimalRepoListEntry{
-				HasSymbols: rle.Repository.HasSymbols,
-				Branches:   rle.Repository.Branches,
-			}
 		case RepoListFieldReposMap:
 			l.ReposMap[rle.Repository.ID] = MinimalRepoListEntry{
-				HasSymbols: rle.Repository.HasSymbols,
-				Branches:   rle.Repository.Branches,
+				HasSymbols:    rle.Repository.HasSymbols,
+				Branches:      rle.Repository.Branches,
+				IndexTimeUnix: rle.IndexMetadata.IndexTime.Unix(),
 			}
 		}
 
 	}
+
+	// Only one of these fields is populated and in all cases the size of that
+	// field is the number of Repos in this shard.
+	l.Stats.Repos = len(l.Repos) + len(l.ReposMap)
 
 	return &l, nil
 }
@@ -765,7 +866,7 @@ func (d *indexData) regexpToMatchTreeRecursive(r *syntax.Regexp, minTextSize int
 			}
 		}
 		if len(qs) == 0 {
-			return &noMatchTree{"const"}, isEq, false, nil
+			return &noMatchTree{Why: "const"}, isEq, false, nil
 		}
 		return &orMatchTree{qs}, isEq, false, nil
 	case syntax.OpStar:
@@ -774,4 +875,21 @@ func (d *indexData) regexpToMatchTreeRecursive(r *syntax.Regexp, minTextSize int
 		}
 	}
 	return &bruteForceMatchTree{}, false, false, nil
+}
+
+type timer struct {
+	last time.Time
+}
+
+func newTimer() *timer {
+	return &timer{
+		last: time.Now(),
+	}
+}
+
+func (t *timer) Elapsed() time.Duration {
+	now := time.Now()
+	d := now.Sub(t.last)
+	t.last = now
+	return d
 }

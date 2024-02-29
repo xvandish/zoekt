@@ -17,7 +17,6 @@ import (
 
 	sglog "github.com/sourcegraph/log"
 	"github.com/sourcegraph/log/logtest"
-
 	"github.com/xeipuuv/gojsonschema"
 	"google.golang.org/grpc"
 
@@ -34,9 +33,10 @@ func TestServer_defaultArgs(t *testing.T) {
 	}
 
 	s := &Server{
-		Sourcegraph: newSourcegraphClient(root, "", WithBatchSize(0)),
-		IndexDir:    "/testdata/index",
-		CPUCount:    6,
+		Sourcegraph:      newSourcegraphClient(root, "", WithBatchSize(0)),
+		IndexDir:         "/testdata/index",
+		CPUCount:         6,
+		IndexConcurrency: 1,
 	}
 	want := &indexArgs{
 		IndexOptions: IndexOptions{
@@ -53,9 +53,87 @@ func TestServer_defaultArgs(t *testing.T) {
 	}
 }
 
+func TestServer_parallelism(t *testing.T) {
+	root, err := url.Parse("http://api.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name             string
+		cpuCount         int
+		indexConcurrency int
+		options          IndexOptions
+		want             int
+	}{
+		{
+			name:             "CPU count divides evenly",
+			cpuCount:         16,
+			indexConcurrency: 8,
+			want:             2,
+		},
+		{
+			name:             "no shard level parallelism",
+			cpuCount:         4,
+			indexConcurrency: 4,
+			want:             1,
+		},
+		{
+			name:             "index option overrides server flag",
+			cpuCount:         2,
+			indexConcurrency: 1,
+			options: IndexOptions{
+				ShardConcurrency: 1,
+			},
+			want: 1,
+		},
+		{
+			name:             "ignore invalid index option",
+			cpuCount:         8,
+			indexConcurrency: 2,
+			options: IndexOptions{
+				ShardConcurrency: -1,
+			},
+			want: 4,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{
+				Sourcegraph:      newSourcegraphClient(root, "", WithBatchSize(0)),
+				IndexDir:         "/testdata/index",
+				CPUCount:         tt.cpuCount,
+				IndexConcurrency: tt.indexConcurrency,
+			}
+
+			maxProcs := 16
+			got := s.parallelism(tt.options, maxProcs)
+			if tt.want != got {
+				t.Errorf("mismatch, want: %d, got: %d", tt.want, got)
+			}
+		})
+	}
+
+	t.Run("index option is limited by available CPU", func(t *testing.T) {
+		s := &Server{
+			Sourcegraph:      newSourcegraphClient(root, "", WithBatchSize(0)),
+			IndexDir:         "/testdata/index",
+			IndexConcurrency: 1,
+		}
+
+		got := s.indexArgs(IndexOptions{
+			ShardConcurrency: 2048, // Some number that's way too high
+		})
+
+		if got.Parallelism >= 2048 {
+			t.Errorf("parallelism should be limited by available CPUs, instead got %d", got.Parallelism)
+		}
+	})
+}
+
 func TestListRepoIDs(t *testing.T) {
 	t.Run("gRPC", func(t *testing.T) {
-
 		grpcClient := &mockGRPCClient{}
 
 		clientOptions := []SourcegraphClientOption{
@@ -168,7 +246,6 @@ func TestListRepoIDs_Error_REST(t *testing.T) {
 
 	msg := "deadbeaf deadbeaf"
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
 		// This is how Sourcegraph returns error messages to the caller.
 		http.Error(w, msg, http.StatusInternalServerError)
 	}))
@@ -284,6 +361,103 @@ func TestDefaultGRPCServiceConfigurationSyntax(t *testing.T) {
 		}
 
 		t.Fatalf("default service config is invalid:\n%s", errs.String())
+	}
+}
+
+func TestGetBoolFromEnvironmentVariables(t *testing.T) {
+	testCases := []struct {
+		name         string
+		envVarsToSet map[string]string
+
+		envVarNames []string
+		defaultBool bool
+
+		wantBool bool
+		wantErr  bool
+	}{
+		{
+			name: "respect default value: true",
+
+			envVarsToSet: map[string]string{},
+
+			envVarNames: []string{"FOO", "BAR"},
+			defaultBool: true,
+
+			wantBool: true,
+		},
+		{
+			name: "respect default value: false",
+
+			envVarsToSet: map[string]string{},
+
+			envVarNames: []string{"FOO", "BAR"},
+			defaultBool: false,
+
+			wantBool: false,
+		},
+		{
+			name: "read from environment",
+
+			envVarsToSet: map[string]string{"FOO": "1"},
+
+			envVarNames: []string{"FOO"},
+			defaultBool: false,
+
+			wantBool: true,
+		},
+		{
+			name: "read from first env var that is set",
+
+			envVarsToSet: map[string]string{
+				"BAR": "false",
+				"BAZ": "true",
+			},
+
+			envVarNames: []string{"FOO", "BAR", "BAZ"},
+			defaultBool: true,
+
+			wantBool: false,
+		},
+
+		{
+			name: "should error for invalid input",
+
+			envVarsToSet: map[string]string{"INVALID": "not a boolean"},
+
+			envVarNames: []string{"INVALID"},
+			defaultBool: false,
+
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			// Prepare the environment by loading all the appropriate environment variables
+			for _, v := range tc.envVarNames {
+				_ = os.Unsetenv(v)
+			}
+
+			for k := range tc.envVarsToSet {
+				_ = os.Unsetenv(k)
+			}
+
+			for k, v := range tc.envVarsToSet {
+				t.Setenv(k, v)
+			}
+
+			// Run the test
+			got, err := getBoolFromEnvironmentVariables(tc.envVarNames, tc.defaultBool)
+
+			// Examine the results
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("unexpected error (wantErr = %t): %v", tc.wantErr, err)
+			}
+
+			if got != tc.wantBool {
+				t.Errorf("got %v, want %v", got, tc.wantBool)
+			}
+		})
 	}
 }
 

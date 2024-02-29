@@ -17,12 +17,12 @@ import (
 )
 
 func createSourcegraphignoreRepo(dir string) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	script := `mkdir repo
 cd repo
-git init
+git init -b master
 mkdir subdir
 echo acont > afile
 echo sub-cont > subdir/sub-file
@@ -35,7 +35,7 @@ git branch branchdir/abranch
 
 mkdir .sourcegraph
 echo subdir/ > .sourcegraph/ignore
-git add .sourcegraph/ignore 
+git add .sourcegraph/ignore
 git commit -am "ignore subdir/"
 
 git update-ref refs/meta/config HEAD

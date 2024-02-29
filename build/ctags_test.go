@@ -15,6 +15,7 @@
 package build
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestTagsToSections(t *testing.T) {
 		},
 	}
 
-	secs, _, err := tagsToSections(c, tags)
+	secs, _, err := (&tagsToSections{}).Convert(c, tags)
 	if err != nil {
 		t.Fatal("tagsToSections", err)
 	}
@@ -58,7 +59,7 @@ func TestTagsToSectionsMultiple(t *testing.T) {
 		},
 	}
 
-	got, _, err := tagsToSections(c, tags)
+	got, _, err := (&tagsToSections{}).Convert(c, tags)
 	if err != nil {
 		t.Fatal("tagsToSections", err)
 	}
@@ -91,7 +92,7 @@ func TestTagsToSectionsReverse(t *testing.T) {
 		},
 	}
 
-	got, _, err := tagsToSections(c, tags)
+	got, _, err := (&tagsToSections{}).Convert(c, tags)
 	if err != nil {
 		t.Fatal("tagsToSections", err)
 	}
@@ -115,16 +116,38 @@ func TestTagsToSectionsEOF(t *testing.T) {
 			Name: "bar",
 			Line: 2,
 		},
+
+		// We have seen ctags do this on a JS file
+		{
+			Name: "wat",
+			Line: -1,
+		},
+
+		// We have seen ctags return out of bounds lines
+		{
+			Name: "goliath",
+			Line: 3,
+		},
 	}
 
-	secs, _, err := tagsToSections(c, tags)
-	if err != nil {
-		t.Fatal("tagsToSections", err)
+	// We run this test twice. Once with a final \n and without.
+	do := func(t *testing.T, doc []byte) {
+		secs, _, err := (&tagsToSections{}).Convert(doc, tags)
+		if err != nil {
+			t.Fatal("tagsToSections", err)
+		}
+
+		if len(secs) != 1 || secs[0].Start != 17 || secs[0].End != 20 {
+			t.Fatalf("got %#v, want 1 section (17,20)", secs)
+		}
 	}
 
-	if len(secs) != 1 || secs[0].Start != 17 || secs[0].End != 20 {
-		t.Fatalf("got %#v, want 1 section (17,20)", secs)
-	}
+	t.Run("no final newline", func(t *testing.T) {
+		do(t, c)
+	})
+	t.Run("trailing newline", func(t *testing.T) {
+		do(t, append(c, '\n'))
+	})
 }
 
 func TestOverlaps(t *testing.T) {
@@ -227,5 +250,60 @@ func TestOverlaps(t *testing.T) {
 				t.Fatalf("want %d, got %d", tt.pos, got)
 			}
 		})
+	}
+}
+
+func BenchmarkTagsToSections(b *testing.B) {
+	requireCTags(b)
+
+	file, err := os.ReadFile("./testdata/large_file.cc")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	bins, err := ctags.NewParserBinMap("universal-ctags", "", ctags.LanguageMap{}, true)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	parser := ctags.NewCTagsParser(bins)
+	entries, err := parser.Parse("./testdata/large_file.cc", file, ctags.UniversalCTags)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var tagsToSections tagsToSections
+	secs, _, err := tagsToSections.Convert(file, entries)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	if len(secs) != 439 {
+		b.Fatalf("got %d sections, want 439 sections", len(secs))
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for n := 0; n < b.N; n++ {
+		_, _, err := tagsToSections.Convert(file, entries)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func requireCTags(tb testing.TB) {
+	tb.Helper()
+
+	if checkCTags() != "" {
+		return
+	}
+
+	// On CI we require ctags to be available. Otherwise we skip
+	if os.Getenv("CI") != "" {
+		tb.Fatal("universal-ctags is missing")
+	} else {
+		tb.Skip("universal-ctags is missing")
 	}
 }

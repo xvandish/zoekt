@@ -261,7 +261,6 @@ func TestShardedSearcher_DocumentRanking(t *testing.T) {
 		stream.SenderFunc(func(event *zoekt.SearchResult) {
 			results = append(results, event)
 		}))
-
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,6 +471,7 @@ func TestShardedSearcher_List(t *testing.T) {
 
 	aggStats := stats
 	aggStats.Add(&aggStats) // since both repos have the exact same stats, this works
+	aggStats.Repos = 2      // Add doesn't populate Repos, this is done in Shards	based on the response sizes.
 
 	for _, tc := range []struct {
 		name string
@@ -496,8 +496,8 @@ func TestShardedSearcher_List(t *testing.T) {
 			},
 		},
 		{
-			name: "minimal=false",
-			opts: &zoekt.ListOptions{Minimal: false},
+			name: "default",
+			opts: &zoekt.ListOptions{},
 			want: &zoekt.RepoList{
 				Repos: []*zoekt.RepoListEntry{
 					{
@@ -507,25 +507,6 @@ func TestShardedSearcher_List(t *testing.T) {
 					{
 						Repository: *repos[1],
 						Stats:      stats,
-					},
-				},
-				Stats: aggStats,
-			},
-		},
-		{
-			name: "minimal=true",
-			opts: &zoekt.ListOptions{Minimal: true},
-			want: &zoekt.RepoList{
-				Repos: []*zoekt.RepoListEntry{
-					{
-						Repository: *repos[1],
-						Stats:      stats,
-					},
-				},
-				Minimal: map[uint32]*zoekt.MinimalRepoListEntry{
-					repos[0].ID: {
-						HasSymbols: repos[0].HasSymbols,
-						Branches:   repos[0].Branches,
 					},
 				},
 				Stats: aggStats,
@@ -543,25 +524,6 @@ func TestShardedSearcher_List(t *testing.T) {
 					{
 						Repository: *repos[1],
 						Stats:      stats,
-					},
-				},
-				Stats: aggStats,
-			},
-		},
-		{
-			name: "field=minimal",
-			opts: &zoekt.ListOptions{Field: zoekt.RepoListFieldMinimal},
-			want: &zoekt.RepoList{
-				Repos: []*zoekt.RepoListEntry{
-					{
-						Repository: *repos[1],
-						Stats:      stats,
-					},
-				},
-				Minimal: map[uint32]*zoekt.MinimalRepoListEntry{
-					repos[0].ID: {
-						HasSymbols: repos[0].HasSymbols,
-						Branches:   repos[0].Branches,
 					},
 				},
 				Stats: aggStats,
@@ -604,6 +566,7 @@ func TestShardedSearcher_List(t *testing.T) {
 
 			ignored := []cmp.Option{
 				cmpopts.EquateEmpty(),
+				cmpopts.IgnoreFields(zoekt.MinimalRepoListEntry{}, "IndexTimeUnix"),
 				cmpopts.IgnoreFields(zoekt.RepoListEntry{}, "IndexMetadata"),
 				cmpopts.IgnoreFields(zoekt.RepoStats{}, "IndexBytes"),
 				cmpopts.IgnoreFields(zoekt.Repository{}, "SubRepoMap"),
@@ -899,7 +862,6 @@ func TestSendByRepository(t *testing.T) {
 	// n1, n2, n3 are the number of file matches for each of the 3 repositories in this
 	// test.
 	f := func(n1, n2, n3 uint8) bool {
-
 		sr := createMockSearchResult(n1, n2, n3, wantStats)
 
 		mock := &mockSender{}
@@ -1105,6 +1067,41 @@ func TestAtomCountScore(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestUseKeywordScoring(t *testing.T) {
+	b := testIndexBuilder(t,
+		&zoekt.Repository{},
+		zoekt.Document{Name: "f1", Content: []byte("one two two three")},
+		zoekt.Document{Name: "f2", Content: []byte("one two one two")},
+		zoekt.Document{Name: "f3", Content: []byte("one three three three")})
+
+	ss := newShardedSearcher(1)
+	searcher := searcherForTest(t, b)
+	ss.replace(map[string]zoekt.Searcher{"r1": searcher})
+
+	q := query.NewOr(
+		&query.Substring{Pattern: "one"},
+		&query.Substring{Pattern: "three"})
+
+	opts := zoekt.SearchOptions{
+		UseKeywordScoring: true,
+	}
+
+	results, err := ss.Search(context.Background(), q, &opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, f := range results.Files {
+		got = append(got, f.FileName)
+	}
+
+	want := []string{"f3", "f1", "f2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

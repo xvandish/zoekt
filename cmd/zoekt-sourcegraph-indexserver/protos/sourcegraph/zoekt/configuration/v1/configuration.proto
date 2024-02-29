@@ -13,9 +13,6 @@ service ZoektConfigurationService {
   // List returns the list of repositories that the client should index.
   rpc List(ListRequest) returns (ListResponse) {}
 
-  // RepositoryRank returns the rank vector for the specified repository.
-  rpc RepositoryRank(RepositoryRankRequest) returns (RepositoryRankResponse) {}
-
   // DocumentRanks returns the rank vectors for all documents in the specified repository.
   rpc DocumentRanks(DocumentRanksRequest) returns (DocumentRanksResponse) {}
 
@@ -57,6 +54,18 @@ message Fingerprint {
   // identifier is an opaque identifier that represents the state of the
   // configuration at the time it was generated.
   uint64 identifier = 2;
+}
+
+enum CTagsParserType {
+  C_TAGS_PARSER_TYPE_UNSPECIFIED = 0;
+  C_TAGS_PARSER_TYPE_NONE = 1;
+  C_TAGS_PARSER_TYPE_UNIVERSAL = 2;
+  C_TAGS_PARSER_TYPE_SCIP = 3;
+}
+
+message LanguageMapping {
+  string language = 1;
+  CTagsParserType ctags = 2;
 }
 
 // ZoektIndexOptions are options which change what we index for a
@@ -102,6 +111,12 @@ message ZoektIndexOptions {
 
   // error, if non-empty, indicates that the request failed for the repo.
   string error = 11;
+
+  // map of languages
+  repeated LanguageMapping language_map = 12;
+
+  // the number of threads to use for indexing shards.
+  int32 shard_concurrency = 13;
 }
 
 // ZoektRepositoryBranch describes an indexed branch of a repository.
@@ -126,19 +141,6 @@ message ListRequest {
 message ListResponse {
   // repo_ids is the list of repository IDs that the client should index.
   repeated int32 repo_ids = 1;
-}
-
-// RepositoryRankRequest is the request to the RepositoryRank RPC.
-message RepositoryRankRequest {
-  // repository is the repository name.
-  string repository = 1;
-}
-
-message RepositoryRankResponse {
-  // rank is the rank vector for the given repository. Repositories are assumed to
-  // be ordered by each pairwise component of the resulting vector, higher ranks coming earlier.
-  // We currently rank first by user-defined scores, then by GitHub star count.
-  repeated double rank = 1;
 }
 
 // DocumentRanksRequest is the request to the DocumentRanks RPC.
@@ -167,6 +169,9 @@ message UpdateIndexStatusRequest {
 
     // branches is the list of branches that the client has indexed.
     repeated ZoektRepositoryBranch branches = 2;
+
+    // index_time_unix is the unix timestamp for when the index was created.
+    int64 index_time_unix = 3;
   }
 
   repeated Repository repositories = 1;

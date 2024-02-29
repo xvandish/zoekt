@@ -17,36 +17,44 @@ package zoekt // import "github.com/xvandish/zoekt"
 import (
 	"bytes"
 	"encoding/gob"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/grafana/regexp"
 )
 
 /*
-BenchmarkMinimalRepoListEncodings/slice-8         	    570	  2145665 ns/op	   753790 bytes	   3981 B/op	      0 allocs/op
-BenchmarkMinimalRepoListEncodings/map-8           	    360	  3337522 ns/op	   740778 bytes	 377777 B/op	  13002 allocs/op
+BenchmarkMinimalRepoListEncodings/slice-8								570		2145665 ns/op		 753790 bytes		 3981 B/op				0 allocs/op
+BenchmarkMinimalRepoListEncodings/map-8									360		3337522 ns/op		 740778 bytes	 377777 B/op		13002 allocs/op
 */
 func BenchmarkMinimalRepoListEncodings(b *testing.B) {
 	size := uint32(13000) // 2021-06-24 rough estimate of number of repos on a replica.
 
 	type Slice struct {
-		ID         uint32
-		HasSymbols bool
-		Branches   []RepositoryBranch
+		ID            uint32
+		HasSymbols    bool
+		Branches      []RepositoryBranch
+		IndexTimeUnix int64
 	}
 
 	branches := []RepositoryBranch{{Name: "HEAD", Version: strings.Repeat("a", 40)}}
 	mapData := make(map[uint32]*MinimalRepoListEntry, size)
 	sliceData := make([]Slice, 0, size)
+	indexTime := time.Now().Unix()
 
 	for id := uint32(1); id <= size; id++ {
 		mapData[id] = &MinimalRepoListEntry{
-			HasSymbols: true,
-			Branches:   branches,
+			HasSymbols:    true,
+			Branches:      branches,
+			IndexTimeUnix: indexTime,
 		}
 		sliceData = append(sliceData, Slice{
-			ID:         id,
-			HasSymbols: true,
-			Branches:   branches,
+			ID:            id,
+			HasSymbols:    true,
+			Branches:      branches,
+			IndexTimeUnix: indexTime,
 		})
 	}
 
@@ -77,7 +85,7 @@ func benchmarkEncoding(data interface{}) func(*testing.B) {
 }
 
 func TestSizeBytesSearchResult(t *testing.T) {
-	var sr = SearchResult{
+	sr := SearchResult{
 		Stats:    Stats{},    // 129 bytes
 		Progress: Progress{}, // 16 bytes
 		Files: []FileMatch{{ // 24 bytes + 460 bytes
@@ -129,5 +137,103 @@ func TestSizeBytesChunkMatches(t *testing.T) {
 	var wantBytes uint64 = 208
 	if cm.sizeBytes() != wantBytes {
 		t.Fatalf("want %d, got %d", wantBytes, cm.sizeBytes())
+	}
+}
+
+func TestMatchSize(t *testing.T) {
+	cases := []struct {
+		v    any
+		size int
+	}{{
+		v:    FileMatch{},
+		size: 256,
+	}, {
+		v:    ChunkMatch{},
+		size: 112,
+	}, {
+		v:    candidateMatch{},
+		size: 80,
+	}, {
+		v:    candidateChunk{},
+		size: 40,
+	}}
+	for _, c := range cases {
+		got := reflect.TypeOf(c.v).Size()
+		if int(got) != c.size {
+			t.Errorf(`sizeof struct %T has changed from %d to %d.
+These are match structs that occur a lot in memory, so we optimize size.
+When changing, please ensure there isn't unnecessary padding via the
+tool fieldalignment then update this test.`, c.v, c.size, got)
+		}
+	}
+}
+
+func TestSearchOptions_String(t *testing.T) {
+	// To make sure we don't forget to update the string implementation we use
+	// reflection to generate a SearchOptions with every field being non
+	// default. We then check that the field name is present in the output.
+	opts := SearchOptions{}
+	var fieldNames []string
+	rv := reflect.ValueOf(&opts).Elem()
+	for i := 0; i < rv.NumField(); i++ {
+		f := rv.Field(i)
+		name := rv.Type().Field(i).Name
+		fieldNames = append(fieldNames, name)
+		switch f.Kind() {
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Int:
+			f.SetInt(1)
+		case reflect.Int64:
+			f.SetInt(1)
+		case reflect.Float64:
+			f.SetFloat(1)
+		case reflect.Map:
+			// Only map is SpanContext
+			f.Set(reflect.ValueOf(map[string]string{"key": "value"}))
+		default:
+			t.Fatalf("add support for %s field (%s)", f.Kind(), name)
+		}
+	}
+
+	s := opts.String()
+	for _, name := range fieldNames {
+		found, err := regexp.MatchString("\\b"+regexp.QuoteMeta(name)+"\\b", s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			t.Errorf("could not find field %q in string output of SearchOptions:\n%s", name, s)
+		}
+	}
+
+	webDefaults := SearchOptions{
+		MaxWallTime: 10 * time.Second,
+	}
+	webDefaults.SetDefaults()
+
+	// Now we hand craft a few corner and common cases
+	cases := []struct {
+		Opts SearchOptions
+		Want string
+	}{{
+		// Empty
+		Opts: SearchOptions{},
+		Want: "zoekt.SearchOptions{ }",
+	}, {
+		// healthz options
+		Opts: SearchOptions{ShardMaxMatchCount: 1, TotalMaxMatchCount: 1, MaxDocDisplayCount: 1},
+		Want: "zoekt.SearchOptions{ ShardMaxMatchCount=1 TotalMaxMatchCount=1 MaxDocDisplayCount=1 }",
+	}, {
+		// zoekt-webserver defaults
+		Opts: webDefaults,
+		Want: "zoekt.SearchOptions{ ShardMaxMatchCount=100000 TotalMaxMatchCount=1000000 MaxWallTime=10s }",
+	}}
+
+	for _, tc := range cases {
+		got := tc.Opts.String()
+		if got != tc.Want {
+			t.Errorf("unexpected String for %#v:\ngot:  %s\nwant: %s", tc.Opts, got, tc.Want)
+		}
 	}
 }

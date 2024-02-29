@@ -1,7 +1,7 @@
-FROM alpine:3.16.4
+FROM alpine:3.18
 
 RUN apk update --no-cache && apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates bind-tools tini git jansson curl tar python3 rsync tzdata && \
+    apk add --no-cache ca-certificates bind-tools tini 'git>=2.38.5-r0' jansson curl tar python3 rsync tzdata && \
     apk add --upgrade --no-cache 'libcrypto1.1>=1.1.1n-r0' 'libssl1.1>=1.1.1n-r0' 'pcre2>=10.40-r0' 'e2fsprogs>=1.46.6-r0' && \
     ln -sf python3 /usr/bin/python
 # Run as non-root user sourcegraph. External volumes should be mounted under /data (which will be owned by sourcegraph).
@@ -20,6 +20,7 @@ RUN apk update --no-cache && apk upgrade --no-cache && \
 COPY --from=zoekt \
     /usr/local/bin/universal-* \
     /usr/local/bin/zoekt-indexserver \
+    /usr/local/bin/scip-ctags \
     /usr/local/bin/zoekt-archive-index \
     /usr/local/bin/zoekt-git-clone \
     /usr/local/bin/zoekt-git-index \ 

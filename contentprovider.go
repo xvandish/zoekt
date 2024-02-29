@@ -18,9 +18,14 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"path"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"github.com/sourcegraph/zoekt/ctags"
 )
 
 var _ = log.Println
@@ -135,10 +140,15 @@ func (p *contentProvider) findOffset(filename bool, r uint32) uint32 {
 func (p *contentProvider) fillMatches(ms []*candidateMatch, numContextLines int, language string, debug bool) []LineMatch {
 	var result []LineMatch
 	if ms[0].fileName {
+		score, debugScore, _ := p.candidateMatchScore(ms, language, debug)
+
 		// There is only "line" in a filename.
 		res := LineMatch{
 			Line:     p.id.fileName(p.idx),
 			FileName: true,
+
+			Score:      score,
+			DebugScore: debugScore,
 		}
 
 		for _, m := range ms {
@@ -152,22 +162,25 @@ func (p *contentProvider) fillMatches(ms []*candidateMatch, numContextLines int,
 		}
 	} else {
 		ms = breakMatchesOnNewlines(ms, p.data(false))
-		result = p.fillContentMatches(ms, numContextLines)
-	}
-
-	sects := p.docSections()
-	for i, m := range result {
-		result[i].Score, result[i].DebugScore = p.matchScore(sects, &m, language, debug)
+		result = p.fillContentMatches(ms, numContextLines, language, debug)
 	}
 
 	return result
 }
 
+// fillChunkMatches converts the internal candidateMatch slice into our APIs ChunkMatch.
+//
+// Performance invariant: ms is sorted and non-overlapping.
+//
+// Note: the byte slices may be backed by mmapped data, so before being
+// returned by the API it needs to be copied.
 func (p *contentProvider) fillChunkMatches(ms []*candidateMatch, numContextLines int, language string, debug bool) []ChunkMatch {
 	var result []ChunkMatch
 	if ms[0].fileName {
 		// If the first match is a filename match, there will only be
 		// one match and the matched content will be the filename.
+
+		score, debugScore, _ := p.candidateMatchScore(ms, language, debug)
 
 		fileName := p.id.fileName(p.idx)
 		ranges := make([]Range, 0, len(ms))
@@ -191,20 +204,18 @@ func (p *contentProvider) fillChunkMatches(ms []*candidateMatch, numContextLines
 			ContentStart: Location{ByteOffset: 0, LineNumber: 1, Column: 1},
 			Ranges:       ranges,
 			FileName:     true,
+
+			Score:      score,
+			DebugScore: debugScore,
 		}}
 	} else {
-		result = p.fillContentChunkMatches(ms, numContextLines)
-	}
-
-	sects := p.docSections()
-	for i, m := range result {
-		result[i].Score, result[i].DebugScore = p.chunkMatchScore(sects, &m, language, debug)
+		result = p.fillContentChunkMatches(ms, numContextLines, language, debug)
 	}
 
 	return result
 }
 
-func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLines int) []LineMatch {
+func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLines int, language string, debug bool) []LineMatch {
 	var result []LineMatch
 	for len(ms) > 0 {
 		m := ms[0]
@@ -260,19 +271,18 @@ func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLin
 			finalMatch.After = p.newlines().getLines(data, num+1, num+1+numContextLines)
 		}
 
-		for _, m := range lineCands {
+		score, debugScore, symbolInfo := p.candidateMatchScore(lineCands, language, debug)
+		finalMatch.Score = score
+		finalMatch.DebugScore = debugScore
+
+		for i, m := range lineCands {
 			fragment := LineFragmentMatch{
 				Offset:      m.byteOffset,
 				LineOffset:  int(m.byteOffset) - lineStart,
 				MatchLength: int(m.byteMatchSz),
 			}
-			if m.symbol {
-				start := p.id.fileEndSymbol[p.idx]
-				fragment.SymbolInfo = p.id.symbols.data(start + m.symbolIdx)
-				if fragment.SymbolInfo != nil {
-					sec := p.docSections()[m.symbolIdx]
-					fragment.SymbolInfo.Sym = string(data[sec.Start:sec.End])
-				}
+			if i < len(symbolInfo) && symbolInfo[i] != nil {
+				fragment.SymbolInfo = symbolInfo[i]
 			}
 
 			finalMatch.LineFragments = append(finalMatch.LineFragments, fragment)
@@ -282,15 +292,28 @@ func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLin
 	return result
 }
 
-func (p *contentProvider) fillContentChunkMatches(ms []*candidateMatch, numContextLines int) []ChunkMatch {
+func (p *contentProvider) fillContentChunkMatches(ms []*candidateMatch, numContextLines int, language string, debug bool) []ChunkMatch {
 	newlines := p.newlines()
-	chunks := chunkCandidates(ms, newlines, numContextLines)
 	data := p.data(false)
+
+	// columnHelper prevents O(len(ms) * len(data)) lookups for all columns.
+	// However, it depends on ms being sorted by byteOffset and non-overlapping.
+	// This invariant is true at the time of writing, but we conservatively
+	// enforce this. Note: chunkCandidates preserves the sorting so safe to
+	// transform now.
+	columnHelper := columnHelper{data: data}
+	if !sort.IsSorted((sortByOffsetSlice)(ms)) {
+		log.Printf("WARN: performance invariant violated. candidate matches are not sorted in fillContentChunkMatches. Report to developers.")
+		sort.Sort((sortByOffsetSlice)(ms))
+	}
+
+	chunks := chunkCandidates(ms, newlines, numContextLines)
 	chunkMatches := make([]ChunkMatch, 0, len(chunks))
 	for _, chunk := range chunks {
+		score, debugScore, symbolInfo := p.candidateMatchScore(chunk.candidates, language, debug)
+
 		ranges := make([]Range, 0, len(chunk.candidates))
-		var symbolInfo []*Symbol
-		for i, cm := range chunk.candidates {
+		for _, cm := range chunk.candidates {
 			startOffset := cm.byteOffset
 			endOffset := cm.byteOffset + cm.byteMatchSz
 			startLine, startLineOffset, _ := newlines.atOffset(startOffset)
@@ -300,27 +323,14 @@ func (p *contentProvider) fillContentChunkMatches(ms []*candidateMatch, numConte
 				Start: Location{
 					ByteOffset: startOffset,
 					LineNumber: uint32(startLine),
-					Column:     uint32(utf8.RuneCount(data[startLineOffset:startOffset]) + 1),
+					Column:     columnHelper.get(startLineOffset, startOffset),
 				},
 				End: Location{
 					ByteOffset: endOffset,
 					LineNumber: uint32(endLine),
-					Column:     uint32(utf8.RuneCount(data[endLineOffset:endOffset]) + 1),
+					Column:     columnHelper.get(endLineOffset, endOffset),
 				},
 			})
-
-			if cm.symbol {
-				if symbolInfo == nil {
-					symbolInfo = make([]*Symbol, len(chunk.candidates))
-				}
-				start := p.id.fileEndSymbol[p.idx]
-				si := p.id.symbols.data(start + cm.symbolIdx)
-				if si != nil {
-					sec := p.docSections()[cm.symbolIdx]
-					si.Sym = string(data[sec.Start:sec.End])
-				}
-				symbolInfo[i] = si
-			}
 		}
 
 		firstLineNumber := int(chunk.firstLine) - numContextLines
@@ -339,22 +349,27 @@ func (p *contentProvider) fillContentChunkMatches(ms []*candidateMatch, numConte
 			FileName:   false,
 			Ranges:     ranges,
 			SymbolInfo: symbolInfo,
+			Score:      score,
+			DebugScore: debugScore,
 		})
 	}
 	return chunkMatches
 }
 
 type candidateChunk struct {
+	candidates []*candidateMatch
 	firstLine  uint32 // 1-based, inclusive
 	lastLine   uint32 // 1-based, inclusive
 	minOffset  uint32 // 0-based, inclusive
 	maxOffset  uint32 // 0-based, exclusive
-	candidates []*candidateMatch
 }
 
 // chunkCandidates groups a set of sorted, non-overlapping candidate matches by line number. Adjacent
 // chunks will be merged if adding `numContextLines` to the beginning and end of the chunk would cause
 // it to overlap with an adjacent chunk.
+//
+// input invariants: ms is sorted by byteOffset and is non overlapping with respect to endOffset.
+// output invariants: if you flatten candidates the input invariant is retained.
 func chunkCandidates(ms []*candidateMatch, newlines newlines, numContextLines int) []candidateChunk {
 	var chunks []candidateChunk
 	for _, m := range ms {
@@ -384,6 +399,41 @@ func chunkCandidates(ms []*candidateMatch, newlines newlines, numContextLines in
 		}
 	}
 	return chunks
+}
+
+// columnHelper is a helper struct which caches the number of runes last
+// counted. If we naively use utf8.RuneCount for each match on a line, this
+// leads to an O(nm) algorithm where m is the number of matches and n is the
+// length of the line. Aassuming we our candidates are increasing in offset
+// makes this operation O(n) instead.
+type columnHelper struct {
+	data []byte
+
+	// 0 values for all these are valid values
+	lastLineOffset int
+	lastOffset     uint32
+	lastRuneCount  uint32
+}
+
+// get returns the line column for offset. offset is the byte offset of the
+// rune in data. lineOffset is the byte offset inside of data for the line
+// containing offset.
+func (c *columnHelper) get(lineOffset int, offset uint32) uint32 {
+	var runeCount uint32
+
+	if lineOffset == c.lastLineOffset && offset >= c.lastOffset {
+		// Can count from last calculation
+		runeCount = c.lastRuneCount + uint32(utf8.RuneCount(c.data[c.lastOffset:offset]))
+	} else {
+		// Need to count from the beginning of line
+		runeCount = uint32(utf8.RuneCount(c.data[lineOffset:offset]))
+	}
+
+	c.lastLineOffset = lineOffset
+	c.lastOffset = offset
+	c.lastRuneCount = runeCount
+
+	return runeCount + 1
 }
 
 type newlines struct {
@@ -448,6 +498,18 @@ func (nls newlines) getLines(data []byte, low, high int) []byte {
 	lowStart, _ := nls.lineBounds(low)
 	_, highEnd := nls.lineBounds(high - 1)
 
+	// Drop any trailing newline. Editors do not treat a trailing newline as
+	// the start of a new line, so we should not either. lineBounds clamps to
+	// len(data) when an out-of-bounds line is requested.
+	//
+	// As an example, if we request lines 1-5 from a file with contents
+	// `one\ntwo\nthree\n`, we should return `one\ntwo\nthree` because those are
+	// the three "lines" in the file, separated by newlines.
+	if highEnd == uint32(len(data)) && bytes.HasSuffix(data, []byte{'\n'}) {
+		highEnd = highEnd - 1
+		lowStart = min(lowStart, highEnd)
+	}
+
 	return data[lowStart:highEnd]
 }
 
@@ -461,7 +523,6 @@ const (
 	scoreSymbol           = 7000.0
 	scorePartialSymbol    = 4000.0
 	scoreKindMatch        = 100.0
-	scoreRepetitionFactor = 1.0
 	scoreFactorAtomMatch  = 400.0
 
 	// File-only scoring signals. For now these are also bounded ~9000 to give them
@@ -476,7 +537,7 @@ const (
 
 // findSection checks whether a section defined by offset and size lies within
 // one of the sections in secs.
-func findSection(secs []DocumentSection, off, sz uint32) (int, bool) {
+func findSection(secs []DocumentSection, off, sz uint32) (uint32, bool) {
 	j := sort.Search(len(secs), func(i int) bool {
 		return secs[i].End >= off+sz
 	})
@@ -486,115 +547,67 @@ func findSection(secs []DocumentSection, off, sz uint32) (int, bool) {
 	}
 
 	if secs[j].Start <= off && off+sz <= secs[j].End {
-		return j, true
+		return uint32(j), true
 	}
 	return 0, false
 }
 
-func (p *contentProvider) chunkMatchScore(secs []DocumentSection, m *ChunkMatch, language string, debug bool) (float64, string) {
-	type debugScore struct {
-		score float64
-		what  string
+func (p *contentProvider) findSymbol(cm *candidateMatch) (DocumentSection, *Symbol, bool) {
+	if cm.fileName {
+		return DocumentSection{}, nil, false
 	}
 
-	score := &debugScore{}
-	maxScore := &debugScore{}
+	secs := p.docSections()
 
-	addScore := func(what string, s float64) {
-		if debug {
-			score.what += fmt.Sprintf("%s:%.2f, ", what, s)
-		}
-		score.score += s
+	secIdx, ok := cm.symbolIdx, cm.symbol
+	if !ok {
+		// Not from a symbol matchtree. Lets see if it intersects with a symbol.
+		secIdx, ok = findSection(secs, cm.byteOffset, cm.byteMatchSz)
+	}
+	if !ok {
+		return DocumentSection{}, nil, false
 	}
 
-	for i, r := range m.Ranges {
-		// calculate the start and end offset relative to the start of the content
-		relStartOffset := int(r.Start.ByteOffset - m.ContentStart.ByteOffset)
-		relEndOffset := int(r.End.ByteOffset - m.ContentStart.ByteOffset)
+	sec := secs[secIdx]
 
-		startBoundary := relStartOffset < len(m.Content) && (relStartOffset == 0 || byteClass(m.Content[relStartOffset-1]) != byteClass(m.Content[relStartOffset]))
-		endBoundary := relEndOffset > 0 && (relEndOffset == len(m.Content) || byteClass(m.Content[relEndOffset-1]) != byteClass(m.Content[relEndOffset]))
+	// Now lets hydrate in the SymbolInfo. We do not hydrate in SymbolInfo.Sym
+	// since some callsites do not need it stored, and that incurs an extra
+	// copy.
+	//
+	// 2024-01-08 we are refactoring this and the code path indicates this can
+	// fail, so callers need to handle nil symbol. However, it would be
+	// surprising that we have a matching section but not symbol data.
+	start := p.id.fileEndSymbol[p.idx]
+	si := p.id.symbols.data(start + secIdx)
 
-		score.score = 0
-		score.what = ""
-
-		if startBoundary && endBoundary {
-			addScore("WordMatch", scoreWordMatch)
-		} else if startBoundary || endBoundary {
-			addScore("PartialWordMatch", scorePartialWordMatch)
-		}
-
-		if m.FileName {
-			sep := bytes.LastIndexByte(m.Content, '/')
-			startMatch := relStartOffset == sep+1
-			endMatch := relEndOffset == len(m.Content)
-			if startMatch && endMatch {
-				addScore("Base", scoreBase)
-			} else if startMatch || endMatch {
-				addScore("EdgeBase", (scoreBase+scorePartialBase)/2)
-			} else if sep < relStartOffset {
-				addScore("InnerBase", scorePartialBase)
-			}
-		} else if secIdx, ok := findSection(secs, uint32(r.Start.ByteOffset), uint32(r.End.ByteOffset-r.Start.ByteOffset)); ok {
-			sec := secs[secIdx]
-			startMatch := sec.Start == uint32(r.Start.ByteOffset)
-			endMatch := sec.End == uint32(r.End.ByteOffset)
-			if startMatch && endMatch {
-				addScore("Symbol", scoreSymbol)
-			} else if startMatch || endMatch {
-				addScore("EdgeSymbol", (scoreSymbol+scorePartialSymbol)/2)
-			} else {
-				addScore("InnerSymbol", scorePartialSymbol)
-			}
-
-			var si *Symbol
-			if m.SymbolInfo != nil {
-				si = m.SymbolInfo[i]
-			}
-			if si == nil {
-				// for non-symbol queries, we need to hydrate in SymbolInfo.
-				start := p.id.fileEndSymbol[p.idx]
-				si = p.id.symbols.data(start + uint32(secIdx))
-			}
-			if si != nil {
-				addScore(fmt.Sprintf("kind:%s:%s", language, si.Kind), scoreKind(language, si.Kind))
-			}
-		}
-
-		if score.score > maxScore.score {
-			maxScore.score = score.score
-			maxScore.what = score.what
-		}
-	}
-
-	if debug {
-		maxScore.what = fmt.Sprintf("score:%f <- %s", maxScore.score, strings.TrimRight(maxScore.what, ", "))
-	}
-
-	return maxScore.score, maxScore.what
+	return sec, si, true
 }
 
-func (p *contentProvider) matchScore(secs []DocumentSection, m *LineMatch, language string, debug bool) (float64, string) {
+func (p *contentProvider) candidateMatchScore(ms []*candidateMatch, language string, debug bool) (float64, string, []*Symbol) {
 	type debugScore struct {
-		score float64
 		what  string
+		score float64
 	}
 
 	score := &debugScore{}
 	maxScore := &debugScore{}
 
 	addScore := func(what string, s float64) {
-		if debug {
+		if s != 0 && debug {
 			score.what += fmt.Sprintf("%s:%.2f, ", what, s)
 		}
 		score.score += s
 	}
 
-	for _, f := range m.LineFragments {
-		startBoundary := f.LineOffset < len(m.Line) && (f.LineOffset == 0 || byteClass(m.Line[f.LineOffset-1]) != byteClass(m.Line[f.LineOffset]))
+	filename := p.data(true)
+	var symbolInfo []*Symbol
 
-		end := int(f.LineOffset) + f.MatchLength
-		endBoundary := end > 0 && (end == len(m.Line) || byteClass(m.Line[end-1]) != byteClass(m.Line[end]))
+	for i, m := range ms {
+		data := p.data(m.fileName)
+
+		endOffset := m.byteOffset + m.byteMatchSz
+		startBoundary := m.byteOffset < uint32(len(data)) && (m.byteOffset == 0 || byteClass(data[m.byteOffset-1]) != byteClass(data[m.byteOffset]))
+		endBoundary := endOffset > 0 && (endOffset == uint32(len(data)) || byteClass(data[endOffset-1]) != byteClass(data[endOffset]))
 
 		score.score = 0
 		score.what = ""
@@ -605,21 +618,20 @@ func (p *contentProvider) matchScore(secs []DocumentSection, m *LineMatch, langu
 			addScore("PartialWordMatch", scorePartialWordMatch)
 		}
 
-		if m.FileName {
-			sep := bytes.LastIndexByte(m.Line, '/')
-			startMatch := sep+1 == f.LineOffset
-			endMatch := len(m.Line) == f.LineOffset+f.MatchLength
+		if m.fileName {
+			sep := bytes.LastIndexByte(data, '/')
+			startMatch := int(m.byteOffset) == sep+1
+			endMatch := endOffset == uint32(len(data))
 			if startMatch && endMatch {
 				addScore("Base", scoreBase)
 			} else if startMatch || endMatch {
 				addScore("EdgeBase", (scoreBase+scorePartialBase)/2)
-			} else if sep < f.LineOffset {
+			} else if sep < int(m.byteOffset) {
 				addScore("InnerBase", scorePartialBase)
 			}
-		} else if secIdx, ok := findSection(secs, f.Offset, uint32(f.MatchLength)); ok {
-			sec := secs[secIdx]
-			startMatch := sec.Start == f.Offset
-			endMatch := sec.End == f.Offset+uint32(f.MatchLength)
+		} else if sec, si, ok := p.findSymbol(m); ok {
+			startMatch := sec.Start == m.byteOffset
+			endMatch := sec.End == endOffset
 			if startMatch && endMatch {
 				addScore("Symbol", scoreSymbol)
 			} else if startMatch || endMatch {
@@ -628,15 +640,31 @@ func (p *contentProvider) matchScore(secs []DocumentSection, m *LineMatch, langu
 				addScore("InnerSymbol", scorePartialSymbol)
 			}
 
-			si := f.SymbolInfo
-			if si == nil {
-				// for non-symbol queries, we need to hydrate in SymbolInfo.
-				start := p.id.fileEndSymbol[p.idx]
-				si = p.id.symbols.data(start + uint32(secIdx))
-			}
+			// Score based on symbol data
 			if si != nil {
-				// the LineFragment may not be on a symbol, then si will be nil.
-				addScore(fmt.Sprintf("kind:%s:%s", language, si.Kind), scoreKind(language, si.Kind))
+				symbolKind := ctags.ParseSymbolKind(si.Kind)
+				sym := sectionSlice(data, sec)
+
+				addScore(fmt.Sprintf("kind:%s:%s", language, si.Kind), scoreSymbolKind(language, filename, sym, symbolKind))
+
+				// This is from a symbol tree, so we need to store the symbol
+				// information.
+				if m.symbol {
+					if symbolInfo == nil {
+						symbolInfo = make([]*Symbol, len(ms))
+					}
+					// findSymbols does not hydrate in Sym. So we need to store it.
+					si.Sym = string(sym)
+					symbolInfo[i] = si
+				}
+			}
+		}
+
+		// scoreWeight != 1 means it affects score
+		if !epsilonEqualsOne(m.scoreWeight) {
+			score.score = score.score * m.scoreWeight
+			if debug {
+				score.what += fmt.Sprintf("boost:%.2f, ", m.scoreWeight)
 			}
 		}
 
@@ -650,94 +678,120 @@ func (p *contentProvider) matchScore(secs []DocumentSection, m *LineMatch, langu
 		maxScore.what = fmt.Sprintf("score:%.2f <- %s", maxScore.score, strings.TrimSuffix(maxScore.what, ", "))
 	}
 
-	return maxScore.score, maxScore.what
+	return maxScore.score, maxScore.what, symbolInfo
 }
 
-// scoreKind boosts a match based on the combination of language and kind. The
-// language string comes from go-enry, the kind string from ctags.
-func scoreKind(language string, kind string) float64 {
+// sectionSlice will return data[sec.Start:sec.End] but will clip Start and
+// End such that it won't be out of range.
+func sectionSlice(data []byte, sec DocumentSection) []byte {
+	l := uint32(len(data))
+	if sec.Start >= l {
+		return nil
+	}
+	if sec.End > l {
+		sec.End = l
+	}
+	return data[sec.Start:sec.End]
+}
+
+// scoreSymbolKind boosts a match based on the combination of language, symbol
+// and kind. The language string comes from go-enry, the symbol and kind from
+// ctags.
+func scoreSymbolKind(language string, filename []byte, sym []byte, kind ctags.SymbolKind) float64 {
 	var factor float64
 
 	// Generic ranking which will be overriden by language specific ranking
 	switch kind {
-	case "class":
-		factor = 10
-	case "struct":
-		factor = 9.5
-	case "enum":
-		factor = 9
-	case "interface":
+	case ctags.Type: // scip-ctags regression workaround https://github.com/sourcegraph/sourcegraph/issues/57659
 		factor = 8
-	case "function", "func":
+	case ctags.Class:
+		factor = 10
+	case ctags.Struct:
+		factor = 9.5
+	case ctags.Enum:
+		factor = 9
+	case ctags.Interface:
+		factor = 8
+	case ctags.Function, ctags.Method:
 		factor = 7
-	case "method":
-		factor = 6
-	case "member", "field":
+	case ctags.Field:
 		factor = 5.5
-	case "constant", "const":
+	case ctags.Constant:
 		factor = 5
-	case "var", "variable":
+	case ctags.Variable:
 		factor = 4
+	default:
+		// For all other kinds, assign a low score by default.
+		factor = 1
 	}
 
-	// Refer to universal-ctags --list-kinds-full=<language> to learn about which
-	// kinds are detected for which language.
-	//
-	// Note that go-ctags uses universal-ctags's interactive mode and thus returns
-	// the full name for "kind" and not the one-letter abbreviation.
 	switch language {
 	case "Java", "java":
 		switch kind {
 		// 2022-03-30: go-ctags contains a regex rule for Java classes that sets "kind"
 		// to "classes" instead of "c". We have to cover both cases to support existing
 		// indexes.
-		case "class", "classes":
+		case ctags.Class:
 			factor = 10
-		case "enum":
+		case ctags.Enum:
 			factor = 9
-		case "interface":
+		case ctags.Interface:
 			factor = 8
-		case "method":
+		case ctags.Method:
 			factor = 7
-		case "field":
+		case ctags.Field:
 			factor = 6
-		case "enumConstant":
+		case ctags.EnumConstant:
 			factor = 5
 		}
 	case "Kotlin", "kotlin":
 		switch kind {
-		case "class":
+		case ctags.Class:
 			factor = 10
-		case "interface":
+		case ctags.Interface:
 			factor = 9
-		case "method":
+		case ctags.Method:
 			factor = 8
-		case "typealias":
+		case ctags.TypeAlias:
 			factor = 7
-		case "constant":
+		case ctags.Constant:
 			factor = 6
-		case "variable":
+		case ctags.Variable:
 			factor = 5
 		}
 	case "Go", "go":
 		switch kind {
-		case "interface": // interfaces
+		// scip-ctags regression workaround https://github.com/sourcegraph/sourcegraph/issues/57659
+		// for each case a description of the fields in ctags in the comment
+		case ctags.Type: // interface struct talias
+			factor = 9
+		case ctags.Interface: // interfaces
 			factor = 10
-		case "struct": // structs
+		case ctags.Struct: // structs
 			factor = 9
-		case "talias": // type aliases
+		case ctags.TypeAlias: // type aliases
 			factor = 9
-		case "methodSpec": // interface method specification
+		case ctags.MethodSpec: // interface method specification
 			factor = 8.5
-		case "func": // functions
+		case ctags.Method, ctags.Function: // functions
 			factor = 8
-		case "member": // struct members
+		case ctags.Field: // struct fields
 			factor = 7
-		case "const": // constants
+		case ctags.Constant: // constants
 			factor = 6
-		case "var": // variables
+		case ctags.Variable: // variables
 			factor = 5
 		}
+
+		// Boost exported go symbols. Same implementation as token.IsExported
+		if ch, _ := utf8.DecodeRune(sym); unicode.IsUpper(ch) {
+			factor += 0.5
+		}
+
+		if bytes.HasSuffix(filename, []byte("_test.go")) {
+			factor *= 0.8
+		}
+
 		// Could also rank on:
 		//
 		//   - anonMember  struct anonymous members
@@ -748,21 +802,21 @@ func scoreKind(language string, kind string) float64 {
 		//   - unknown     unknown
 	case "C++", "c++":
 		switch kind {
-		case "class": // classes
+		case ctags.Class: // classes
 			factor = 10
-		case "enum": // enumeration names
+		case ctags.Enum: // enumeration names
 			factor = 9
-		case "function": // function definitions
+		case ctags.Function: // function definitions
 			factor = 8
-		case "struct": // structure names
+		case ctags.Struct: // structure names
 			factor = 7
-		case "union": // union names
+		case ctags.Union: // union names
 			factor = 6
-		case "typdef": // typedefs
+		case ctags.TypeAlias: // typedefs
 			factor = 5
-		case "member": // class, struct, and union members
+		case ctags.Field: // class, struct, and union members
 			factor = 4
-		case "variable": // varialbe definitions
+		case ctags.Variable: // varialbe definitions
 			factor = 3
 		}
 	// Could also rank on:
@@ -774,32 +828,32 @@ func scoreKind(language string, kind string) float64 {
 	// variable    variable definitions
 	case "Scala", "scala":
 		switch kind {
-		case "class":
+		case ctags.Class:
 			factor = 10
-		case "interface":
+		case ctags.Interface:
 			factor = 9
-		case "object":
+		case ctags.Object:
 			factor = 8
-		case "method":
+		case ctags.Function:
 			factor = 7
-		case "type":
+		case ctags.Type:
 			factor = 6
-		case "variable":
+		case ctags.Variable:
 			factor = 5
-		case "package":
+		case ctags.Package:
 			factor = 4
 		}
 	case "Python", "python":
 		switch kind {
-		case "class": // classes
+		case ctags.Class: // classes
 			factor = 10
-		case "function": // function definitions
+		case ctags.Function, ctags.Method: // function definitions
 			factor = 8
-		case "member": // class, struct, and union members
+		case ctags.Field: // class, struct, and union members
 			factor = 4
-		case "variable": // variable definitions
+		case ctags.Variable: // variable definitions
 			factor = 3
-		case "local": // local variables
+		case ctags.Local: // local variables
 			factor = 2
 		}
 		// Could also rank on:
@@ -810,43 +864,58 @@ func scoreKind(language string, kind string) float64 {
 		//   - parameter function parameters
 	case "Ruby", "ruby":
 		switch kind {
-		case "class":
+		case ctags.Class:
 			factor = 10
-		case "method":
+		case ctags.Method:
 			factor = 9
-		case "alias":
+		case ctags.MethodAlias:
 			factor = 8
-		case "module":
+		case ctags.Module:
 			factor = 7
-		case "singletonMethod":
+		case ctags.SingletonMethod:
 			factor = 6
-		case "constant":
+		case ctags.Constant:
 			factor = 5
-		case "accessor":
+		case ctags.Accessor:
 			factor = 4
-		case "library":
+		case ctags.Library:
 			factor = 3
 		}
 	case "PHP", "php":
 		switch kind {
-		case "class":
+		case ctags.Class:
 			factor = 10
-		case "interface":
+		case ctags.Interface:
 			factor = 9
-		case "function":
+		case ctags.Function:
 			factor = 8
-		case "trait":
+		case ctags.Trait:
 			factor = 7
-		case "define":
+		case ctags.Define:
 			factor = 6
-		case "namespace":
+		case ctags.Namespace:
 			factor = 5
-		case "alias":
+		case ctags.MethodAlias:
 			factor = 4
-		case "variable":
+		case ctags.Variable:
 			factor = 3
-		case "local":
+		case ctags.Local:
 			factor = 3
+		}
+	case "GraphQL", "graphql":
+		switch kind {
+		case ctags.Type:
+			factor = 10
+		}
+	case "Markdown", "markdown":
+		// Headers are good signal in docs, but do not rank as highly as code.
+		switch kind {
+		case ctags.Chapter: // #
+			factor = 4
+		case ctags.Section: // ##
+			factor = 3
+		case ctags.Subsection: // ###
+			factor = 2
 		}
 	}
 
@@ -879,9 +948,53 @@ func sortChunkMatchesByScore(ms []ChunkMatch) {
 	sort.Sort(chunkMatchScoreSlice(ms))
 }
 
-// SortFiles sorts files matches. The order depends on the match score, which includes both
-// query-dependent signals like word overlap, and file-only signals like the file ranks (if
-// file ranks are enabled).
+// SortFiles sorts files matches in the order we want to present results to
+// users. The order depends on the match score, which includes both
+// query-dependent signals like word overlap, and file-only signals like the
+// file ranks (if file ranks are enabled).
+//
+// We don't only use the scores, we will also boost some results to present
+// files with novel extensions.
 func SortFiles(ms []FileMatch) {
 	sort.Sort(fileMatchesByScore(ms))
+
+	// Boost a file extension not in the top 3 to the third filematch.
+	boostNovelExtension(ms, 2, 0.9)
+}
+
+func boostNovelExtension(ms []FileMatch, boostOffset int, minScoreRatio float64) {
+	if len(ms) <= boostOffset+1 {
+		return
+	}
+
+	top := ms[:boostOffset]
+	candidates := ms[boostOffset:]
+
+	// Don't bother boosting something which is significantly different to the
+	// result it replaces.
+	minScoreForNovelty := candidates[0].Score * minScoreRatio
+
+	// We want to look for an ext that isn't in the top exts
+	exts := make([]string, len(top))
+	for i := range top {
+		exts[i] = path.Ext(top[i].FileName)
+	}
+
+	for i := range candidates {
+		// Do not assume sorted due to boostNovelExtension being called on subsets
+		if candidates[i].Score < minScoreForNovelty {
+			continue
+		}
+
+		if slices.Contains(exts, path.Ext(candidates[i].FileName)) {
+			continue
+		}
+
+		// Found what we are looking for, now boost to front of candidates (which
+		// is ms[boostOffset])
+		for ; i > 0; i-- {
+			candidates[i], candidates[i-1] = candidates[i-1], candidates[i]
+		}
+		return
+	}
 }

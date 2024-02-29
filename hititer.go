@@ -35,10 +35,10 @@ type hitIterator interface {
 
 // distanceHitIterator looks for hits at a fixed distance apart.
 type distanceHitIterator struct {
-	started  bool
-	distance uint32
 	i1       hitIterator
 	i2       hitIterator
+	distance uint32
+	started  bool
 }
 
 func (i *distanceHitIterator) String() string {
@@ -110,29 +110,17 @@ func (d *indexData) newDistanceTrigramIter(ng1, ng2 ngram, dist uint32, caseSens
 }
 
 func (d *indexData) trigramHitIterator(ng ngram, caseSensitive, fileName bool) (hitIterator, error) {
-	if d.ngrams == nil {
-		return nil, fmt.Errorf("trigramHitIterator: ngrams=nil")
-	}
-
 	variants := []ngram{ng}
 	if !caseSensitive {
 		variants = generateCaseNgrams(ng)
 	}
 
 	iters := make([]hitIterator, 0, len(variants))
+	ngramLookups := 0
+	ngrams := d.ngrams(fileName)
 	for _, v := range variants {
-		if fileName {
-			blob, err := d.fileNameNgrams.GetBlob(v)
-			if err != nil {
-				return nil, err
-			}
-			if len(blob) > 0 {
-				iters = append(iters, newCompressedPostingIterator(blob, v))
-			}
-			continue
-		}
-
-		sec := d.ngrams.Get(v)
+		sec := ngrams.Get(v)
+		ngramLookups++
 		blob, err := d.readSectionBlob(sec)
 		if err != nil {
 			return nil, err
@@ -143,10 +131,14 @@ func (d *indexData) trigramHitIterator(ng ngram, caseSensitive, fileName bool) (
 	}
 
 	if len(iters) == 1 {
-		return iters[0], nil
+		// if we only return 1 then we need to include our ngramLookups stats
+		iter := (iters[0]).(*compressedPostingIterator)
+		iter.ngramLookups = ngramLookups
+		return iter, nil
 	}
 	return &mergingIterator{
-		iters: iters,
+		ngramLookups: ngramLookups,
+		iters:        iters,
 	}, nil
 }
 
@@ -183,18 +175,20 @@ func (i *inMemoryIterator) next(limit uint32) {
 // compressedPostingIterator goes over a delta varint encoded posting
 // list.
 type compressedPostingIterator struct {
-	blob, orig []byte
-	_first     uint32
-	what       ngram
+	blob             []byte
+	indexBytesLoaded int
+	ngramLookups     int
+	_first           uint32
+	what             ngram
 }
 
 func newCompressedPostingIterator(b []byte, w ngram) *compressedPostingIterator {
 	d, sz := binary.Uvarint(b)
 	return &compressedPostingIterator{
-		_first: uint32(d),
-		blob:   b[sz:],
-		orig:   b,
-		what:   w,
+		_first:           uint32(d),
+		blob:             b[sz:],
+		indexBytesLoaded: sz,
+		what:             w,
 	}
 }
 
@@ -216,6 +210,7 @@ func (i *compressedPostingIterator) next(limit uint32) {
 	for i._first <= limit && len(i.blob) > 0 {
 		delta, sz := binary.Uvarint(i.blob)
 		i._first += uint32(delta)
+		i.indexBytesLoaded += sz
 		i.blob = i.blob[sz:]
 	}
 
@@ -225,13 +220,17 @@ func (i *compressedPostingIterator) next(limit uint32) {
 }
 
 func (i *compressedPostingIterator) updateStats(s *Stats) {
-	s.IndexBytesLoaded += int64(len(i.orig) - len(i.blob))
+	s.IndexBytesLoaded += int64(i.indexBytesLoaded)
+	s.NgramLookups += i.ngramLookups
+	i.indexBytesLoaded = 0
+	i.ngramLookups = 0
 }
 
 // mergingIterator forms the merge of a set of hitIterators, to
 // implement an OR operation at the hit level.
 type mergingIterator struct {
-	iters []hitIterator
+	iters        []hitIterator
+	ngramLookups int
 }
 
 func (i *mergingIterator) String() string {
@@ -239,6 +238,8 @@ func (i *mergingIterator) String() string {
 }
 
 func (i *mergingIterator) updateStats(s *Stats) {
+	s.NgramLookups += i.ngramLookups
+	i.ngramLookups = 0
 	for _, j := range i.iters {
 		j.updateStats(s)
 	}

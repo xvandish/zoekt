@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -40,7 +39,6 @@ import (
 	"github.com/bmatcuk/doublestar"
 	"github.com/grafana/regexp"
 	"github.com/rs/xid"
-	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/ctags"
@@ -84,6 +82,9 @@ type Options struct {
 	// if a valid binary couldn't be found.
 	CTagsPath string
 
+	// Same as CTagsPath but for scip-ctags
+	ScipCTagsPath string
+
 	// If set, ctags must succeed.
 	CTagsMustSucceed bool
 
@@ -113,6 +114,8 @@ type Options struct {
 	// since the last indexing job for this repository. These files will be tombstoned
 	// in the older shards for this repository.
 	changedOrRemovedFiles []string
+
+	LanguageMap ctags.LanguageMap
 }
 
 // HashOptions contains only the options in Options that upon modification leads to IndexState of IndexStateMismatch during the next index building.
@@ -242,11 +245,11 @@ type Builder struct {
 
 	nextShardNum int
 	todo         []*zoekt.Document
+	docChecker   zoekt.DocChecker
 	size         int
 
-	parser ctags.Parser
-
-	building sync.WaitGroup
+	parserBins ctags.ParserBinMap
+	building   sync.WaitGroup
 
 	errMu      sync.Mutex
 	buildError error
@@ -254,8 +257,6 @@ type Builder struct {
 	// temp name => final name for finished shards. We only rename
 	// them once all shards succeed to avoid Frankstein corpuses.
 	finishedShards map[string]string
-
-	shardLogger io.WriteCloser
 
 	// indexTime is set by tests for doing reproducible builds.
 	indexTime time.Time
@@ -279,9 +280,18 @@ func checkCTags() string {
 		return ctags
 	}
 
-	if ctags, err := exec.LookPath("ctags-exuberant"); err == nil {
+	return ""
+}
+
+func checkScipCTags() string {
+	if ctags := os.Getenv("SCIP_CTAGS_COMMAND"); ctags != "" {
 		return ctags
 	}
+
+	if ctags, err := exec.LookPath("scip-ctags"); err == nil {
+		return ctags
+	}
+
 	return ""
 }
 
@@ -289,6 +299,10 @@ func checkCTags() string {
 func (o *Options) SetDefaults() {
 	if o.CTagsPath == "" && !o.DisableCTags {
 		o.CTagsPath = checkCTags()
+	}
+
+	if o.ScipCTagsPath == "" && !o.DisableCTags {
+		o.ScipCTagsPath = checkScipCTags()
 	}
 
 	if o.Parallelism == 0 {
@@ -420,15 +434,15 @@ func (o *Options) IndexState() (IndexState, string) {
 // FindRepositoryMetadata returns the index metadata for the repository
 // specified in the options. 'ok' is false if the repository's metadata
 // couldn't be found or if an error occurred.
-func (o *Options) FindRepositoryMetadata() (repository *zoekt.Repository, ok bool, err error) {
+func (o *Options) FindRepositoryMetadata() (repository *zoekt.Repository, metadata *zoekt.IndexMetadata, ok bool, err error) {
 	shard := o.findShard()
 	if shard == "" {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 
-	repositories, _, err := zoekt.ReadMetadataPathAlive(shard)
+	repositories, metadata, err := zoekt.ReadMetadataPathAlive(shard)
 	if err != nil {
-		return nil, false, fmt.Errorf("reading metadata for shard %q: %w", shard, err)
+		return nil, nil, false, fmt.Errorf("reading metadata for shard %q: %w", shard, err)
 	}
 
 	ID := o.RepositoryDescription.ID
@@ -436,7 +450,7 @@ func (o *Options) FindRepositoryMetadata() (repository *zoekt.Repository, ok boo
 		// compound shards contain multiple repositories, so we
 		// have to pick only the one we're looking for
 		if r.ID == ID {
-			return r, true, nil
+			return r, metadata, true, nil
 		}
 	}
 
@@ -444,7 +458,7 @@ func (o *Options) FindRepositoryMetadata() (repository *zoekt.Repository, ok boo
 	// shard that's missing the repository metadata we're looking for. This
 	// should never happen.
 	name := o.RepositoryDescription.Name
-	return nil, false, fmt.Errorf("matching shard %q doesn't contain metadata for repo id %d (%q)", shard, ID, name)
+	return nil, nil, false, fmt.Errorf("matching shard %q doesn't contain metadata for repo id %d (%q)", shard, ID, name)
 }
 
 func (o *Options) findShard() string {
@@ -546,24 +560,17 @@ func NewBuilder(opts Options) (*Builder, error) {
 		finishedShards: map[string]string{},
 	}
 
-	if b.opts.CTagsPath == "" && b.opts.CTagsMustSucceed {
-		return nil, fmt.Errorf("ctags binary not found, but CTagsMustSucceed set")
+	parserBins, err := ctags.NewParserBinMap(
+		b.opts.CTagsPath,
+		b.opts.ScipCTagsPath,
+		opts.LanguageMap,
+		b.opts.CTagsMustSucceed,
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	if strings.Contains(opts.CTagsPath, "universal-ctags") {
-		parser, err := ctags.NewParser(opts.CTagsPath)
-		if err != nil && opts.CTagsMustSucceed {
-			return nil, fmt.Errorf("ctags.NewParser: %v", err)
-		}
-
-		b.parser = parser
-	}
-
-	b.shardLogger = &lumberjack.Logger{
-		Filename:   filepath.Join(opts.IndexDir, "zoekt-builder-shard-log.tsv"),
-		MaxSize:    100, // Megabyte
-		MaxBackups: 5,
-	}
+	b.parserBins = parserBins
 
 	if opts.IsDelta {
 		// Delta shards build on top of previously existing shards.
@@ -598,20 +605,13 @@ func (b *Builder) Add(doc zoekt.Document) error {
 	}
 
 	allowLargeFile := b.opts.IgnoreSizeMax(doc.Name)
-
-	// Adjust trigramMax for allowed large files so we don't exclude them.
-	trigramMax := b.opts.TrigramMax
-	if allowLargeFile {
-		trigramMax = math.MaxInt64
-	}
-
 	if len(doc.Content) > b.opts.SizeMax && !allowLargeFile {
 		// We could pass the document on to the shardbuilder, but if
 		// we pass through a part of the source tree with binary/large
 		// files, the corresponding shard would be mostly empty, so
 		// insert a reason here too.
 		doc.SkipReason = fmt.Sprintf("document size %d larger than limit %d", len(doc.Content), b.opts.SizeMax)
-	} else if err := zoekt.CheckText(doc.Content, trigramMax); err != nil {
+	} else if err := b.docChecker.Check(doc.Content, b.opts.TrigramMax, allowLargeFile); err != nil {
 		doc.SkipReason = err.Error()
 		doc.Language = "binary"
 	}
@@ -622,6 +622,9 @@ func (b *Builder) Add(doc zoekt.Document) error {
 		b.size += len(doc.Name) + len(doc.Content)
 	} else {
 		b.size += len(doc.Name) + len(doc.SkipReason)
+		// Drop the content if we are skipping the document. Skipped content is not counted towards the
+		// shard size limit, so otherwise we might buffer too much data in memory before flushing.
+		doc.Content = nil
 	}
 
 	if b.size > b.opts.ShardMax {
@@ -735,8 +738,6 @@ func (b *Builder) Finish() error {
 		return b.buildError
 	}
 
-	defer b.shardLogger.Close()
-
 	// Collect a map of the old shards on disk. For each new shard we replace we
 	// delete it from toDelete. Anything remaining in toDelete will be removed
 	// after we have renamed everything into place.
@@ -767,8 +768,6 @@ func (b *Builder) Finish() error {
 		}
 
 		delete(toDelete, final)
-
-		b.shardLog("upsert", final, b.opts.RepositoryDescription.Name)
 	}
 
 	b.finishedShards = map[string]string{}
@@ -779,13 +778,11 @@ func (b *Builder) Finish() error {
 			if !strings.HasSuffix(p, ".zoekt") {
 				continue
 			}
-			b.shardLog("tomb", p, b.opts.RepositoryDescription.Name)
 			err := zoekt.SetTombstone(p, b.opts.RepositoryDescription.ID)
 			b.buildError = err
 			continue
 		}
 		log.Printf("removing old shard file: %s", p)
-		b.shardLog("remove", p, b.opts.RepositoryDescription.Name)
 		if err := os.Remove(p); err != nil {
 			b.buildError = err
 		}
@@ -831,8 +828,8 @@ func (b *Builder) flush() error {
 
 	if b.opts.Parallelism > 1 && b.opts.MemProfile == "" {
 		b.building.Add(1)
+		b.throttle <- 1
 		go func() {
-			b.throttle <- 1
 			done, err := b.buildShard(todo, shard)
 			<-b.throttle
 
@@ -864,15 +861,6 @@ func (b *Builder) flush() error {
 	}
 
 	return nil
-}
-
-func (b *Builder) shardLog(action, shard string, repoName string) {
-	shard = filepath.Base(shard)
-	var shardSize int64
-	if fi, err := os.Stat(filepath.Join(b.opts.IndexDir, shard)); err == nil {
-		shardSize = fi.Size()
-	}
-	_, _ = fmt.Fprintf(b.shardLogger, "%s\t%s\t%s\t%d\t%s\n", time.Now().UTC().Format(time.RFC3339), action, shard, shardSize, repoName)
 }
 
 var profileNumber int
@@ -928,6 +916,11 @@ type rankedDoc struct {
 // at query time, because earlier documents receive a boost at query time and
 // have a higher chance of being searched before limits kick in.
 func rank(d *zoekt.Document, origIdx int) []float64 {
+	skipped := 0.0
+	if d.SkipReason != "" {
+		skipped = 1.0
+	}
+
 	generated := 0.0
 	if isGenerated(d.Name) {
 		generated = 1.0
@@ -945,6 +938,9 @@ func rank(d *zoekt.Document, origIdx int) []float64 {
 
 	// Smaller is earlier (=better).
 	return []float64{
+		// Always place skipped docs last
+		skipped,
+
 		// Prefer docs that are not generated
 		generated,
 
@@ -997,13 +993,13 @@ func sortDocuments(todo []*zoekt.Document) {
 }
 
 func (b *Builder) buildShard(todo []*zoekt.Document, nextShardNum int) (*finishedShard, error) {
-	if !b.opts.DisableCTags && b.opts.CTagsPath != "" {
-		err := ctagsAddSymbols(todo, b.parser, b.opts.CTagsPath)
+	if !b.opts.DisableCTags && (b.opts.CTagsPath != "" || b.opts.ScipCTagsPath != "") {
+		err := parseSymbols(todo, b.opts.LanguageMap, b.parserBins)
 		if b.opts.CTagsMustSucceed && err != nil {
 			return nil, err
 		}
 		if err != nil {
-			log.Printf("ignoring %s error: %v", b.opts.CTagsPath, err)
+			log.Printf("ignoring universal:%s or scip:%s error: %v", b.opts.CTagsPath, b.opts.ScipCTagsPath, err)
 		}
 	}
 
@@ -1068,8 +1064,11 @@ func (b *Builder) writeShard(fn string, ib *zoekt.IndexBuilder) (*finishedShard,
 		return nil, err
 	}
 
-	log.Printf("finished %s: %d index bytes (overhead %3.1f)", fn, fi.Size(),
-		float64(fi.Size())/float64(ib.ContentSize()+1))
+	log.Printf("finished shard %s: %d index bytes (overhead %3.1f), %d files processed \n",
+		fn,
+		fi.Size(),
+		float64(fi.Size())/float64(ib.ContentSize()+1),
+		ib.NumFiles())
 
 	return &finishedShard{f.Name(), fn}, nil
 }

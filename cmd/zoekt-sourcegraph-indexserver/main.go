@@ -31,24 +31,27 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/keegancsmith/tmpfriend"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/retry"
 	"github.com/peterbourgon/ff/v3/ffcli"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	sglog "github.com/sourcegraph/log"
+	"github.com/sourcegraph/mountinfo"
 	"go.uber.org/automaxprocs/maxprocs"
 	"golang.org/x/net/trace"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
-
-	"github.com/sourcegraph/mountinfo"
 
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/build"
 	proto "github.com/xvandish/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
 	"github.com/xvandish/zoekt/debugserver"
+	"github.com/xvandish/zoekt/grpc/internalerrs"
+	"github.com/xvandish/zoekt/grpc/messagesize"
 	"github.com/xvandish/zoekt/internal/profiler"
 )
 
@@ -79,7 +82,7 @@ var (
 		Help: "A histogram of latencies for indexing a repository.",
 		Buckets: prometheus.ExponentialBucketsRange(
 			(100 * time.Millisecond).Seconds(),
-			(40*time.Minute + indexTimeout).Seconds(), // add an extra 40 minutes to account for the time it takes to clone the repo
+			(40*time.Minute + defaultIndexingTimeout).Seconds(), // add an extra 40 minutes to account for the time it takes to clone the repo
 			20),
 	}, []string{
 		"state", // state is an indexState
@@ -124,6 +127,9 @@ var (
 		Name: "index_num_stopped_tracking_total",
 		Help: "Counts the number of repos we stopped tracking.",
 	})
+
+	clientMetricsOnce sync.Once
+	clientMetrics     *grpcprom.ClientMetrics
 )
 
 // set of repositories that we want to capture separate indexing metrics for
@@ -155,8 +161,8 @@ type Server struct {
 
 	// Interval is how often we sync with Sourcegraph.
 	Interval time.Duration
-	// CPUCount is the amount of parallelism to use when indexing a
-	// repository.
+
+	// CPUCount is the number of CPUs to use for indexing shards.
 	CPUCount int
 
 	queue Queue
@@ -182,6 +188,9 @@ type Server struct {
 	hostname string
 
 	mergeOpts mergeOpts
+
+	// timeout defines how long the index server waits before killing an indexing job.
+	timeout time.Duration
 }
 
 var debug = log.New(io.Discard, "", log.LstdFlags)
@@ -576,9 +585,10 @@ func (s *Server) Index(args *indexArgs) (state indexState, err error) {
 			return s.loggedRun(tr, cmd)
 		},
 
-		findRepositoryMetadata: func(args *indexArgs) (repository *zoekt.Repository, ok bool, err error) {
+		findRepositoryMetadata: func(args *indexArgs) (repository *zoekt.Repository, metadata *zoekt.IndexMetadata, ok bool, err error) {
 			return args.BuildOptions().FindRepositoryMetadata()
 		},
+		timeout: s.timeout,
 	}
 
 	err = gitIndex(c, args, s.Sourcegraph, s.logger)
@@ -586,17 +596,11 @@ func (s *Server) Index(args *indexArgs) (state indexState, err error) {
 		return indexStateFail, err
 	}
 
-	status := []indexStatus{{RepoID: args.RepoID, Branches: args.Branches}}
-	if err := s.Sourcegraph.UpdateIndexStatus(status); err != nil {
-		branches := make([]string, len(args.Branches))
-		for i, b := range args.Branches {
-			branches[i] = fmt.Sprintf("%s=%s", b.Name, b.Version)
-		}
-
+	if err := updateIndexStatusOnSourcegraph(c, args, s.Sourcegraph); err != nil {
 		s.logger.Error("failed to update index status",
 			sglog.String("repo", args.Name),
 			sglog.Uint32("id", args.RepoID),
-			sglog.Strings("branches", branches),
+			sglogBranches("branches", args.Branches),
 			sglog.Error(err),
 		)
 	}
@@ -604,18 +608,74 @@ func (s *Server) Index(args *indexArgs) (state indexState, err error) {
 	return indexStateSuccess, nil
 }
 
+// updateIndexStatusOnSourcegraph pushes the current state to sourcegraph so
+// it can update the zoekt_repos table.
+func updateIndexStatusOnSourcegraph(c gitIndexConfig, args *indexArgs, sg Sourcegraph) error {
+	// We need to read from disk for IndexTime.
+	_, metadata, ok, err := c.findRepositoryMetadata(args)
+	if err != nil {
+		return fmt.Errorf("failed to read metadata for new/updated index: %w", err)
+	}
+	if !ok {
+		return errors.New("failed to find metadata for new/updated index")
+	}
+
+	status := []indexStatus{{
+		RepoID:        args.RepoID,
+		Branches:      args.Branches,
+		IndexTimeUnix: metadata.IndexTime.Unix(),
+	}}
+	if err := sg.UpdateIndexStatus(status); err != nil {
+		return fmt.Errorf("failed to update sourcegraph with status: %w", err)
+	}
+
+	return nil
+}
+
+func sglogBranches(key string, branches []zoekt.RepositoryBranch) sglog.Field {
+	ss := make([]string, len(branches))
+	for i, b := range branches {
+		ss[i] = fmt.Sprintf("%s=%s", b.Name, b.Version)
+	}
+	return sglog.Strings(key, ss)
+}
+
 func (s *Server) indexArgs(opts IndexOptions) *indexArgs {
+	parallelism := s.parallelism(opts, runtime.GOMAXPROCS(0))
 	return &indexArgs{
 		IndexOptions: opts,
-
-		IndexDir:    s.IndexDir,
-		Parallelism: s.CPUCount,
-
-		Incremental: true,
+		IndexDir:     s.IndexDir,
+		Parallelism:  parallelism,
+		Incremental:  true,
 
 		// 1 MB; match https://sourcegraph.sgdev.org/github.com/sourcegraph/sourcegraph/-/blob/cmd/symbols/internal/symbols/search.go#L22
 		FileLimit: 1 << 20,
 	}
+}
+
+// parallelism consults both the server flags and index options to determine the number
+// of shards to index in parallel. If the CPUCount index option is provided, it always
+// overrides the server flag.
+func (s *Server) parallelism(opts IndexOptions, maxProcs int) int {
+	var parallelism int
+	if opts.ShardConcurrency > 0 {
+		parallelism = int(opts.ShardConcurrency)
+	} else {
+		parallelism = s.CPUCount
+	}
+
+	// In case this was accidentally misconfigured, we cap the threads at 4 times the available CPUs
+	if parallelism > 4*maxProcs {
+		parallelism = 4 * maxProcs
+	}
+
+	// If index concurrency is set, then divide the parallelism by the number of
+	// repos we're indexing in parallel
+	if s.IndexConcurrency > 1 {
+		parallelism = int(math.Ceil(float64(parallelism) / float64(s.IndexConcurrency)))
+	}
+
+	return parallelism
 }
 
 func createEmptyShard(args *indexArgs) error {
@@ -842,7 +902,6 @@ func (s *Server) handleDebugList(w http.ResponseWriter, r *http.Request) {
 // trigger an initial merge run. In the steady-state, merges happen rarely, even
 // on busy instances, and users can rely on automatic merging instead.
 func (s *Server) handleDebugMerge(w http.ResponseWriter, _ *http.Request) {
-
 	// A merge operation can take very long, depending on the number merges and the
 	// target size of the compound shards. We run the merge in the background and
 	// return immediately to the user.
@@ -944,24 +1003,13 @@ func listIndexed(indexDir string) []uint32 {
 	return repoIDs
 }
 
-func hostnameBestEffort() string {
-	if h := os.Getenv("NODE_NAME"); h != "" {
-		return h
-	}
-	if h := os.Getenv("HOSTNAME"); h != "" {
-		return h
-	}
-	hostname, _ := os.Hostname()
-	return hostname
-}
-
 // setupTmpDir sets up a temporary directory on the same volume as the
 // indexes.
 //
 // If main is true we will delete older temp directories left around. main is
 // false when this is a debug command.
-func setupTmpDir(main bool, index string) error {
-	// change the target tmp directory depending on if its our main daemon or a
+func setupTmpDir(logger sglog.Logger, main bool, index string) error {
+	// change the target tmp directory depending on if it's our main daemon or a
 	// debug sub command.
 	dir := ".indexserver.debug.tmp"
 	if main {
@@ -969,14 +1017,20 @@ func setupTmpDir(main bool, index string) error {
 	}
 
 	tmpRoot := filepath.Join(index, dir)
-	if err := os.MkdirAll(tmpRoot, 0755); err != nil {
+
+	if main {
+		logger.Info("removing tmp dir", sglog.String("tmpRoot", tmpRoot))
+		err := os.RemoveAll(tmpRoot)
+		if err != nil {
+			logger.Error("failed to remove tmp dir", sglog.String("tmpRoot", tmpRoot), sglog.Error(err))
+		}
+	}
+
+	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
 		return err
 	}
-	if !tmpfriend.IsTmpFriendDir(tmpRoot) {
-		_, err := tmpfriend.RootTempDir(tmpRoot)
-		return err
-	}
-	return nil
+
+	return os.Setenv("TMPDIR", tmpRoot)
 }
 
 func printMetaData(fn string) error {
@@ -1178,15 +1232,15 @@ type rootConfig struct {
 func (rc *rootConfig) registerRootFlags(fs *flag.FlagSet) {
 	fs.StringVar(&rc.root, "sourcegraph_url", os.Getenv("SRC_FRONTEND_INTERNAL"), "http://sourcegraph-frontend-internal or http://localhost:3090. If a path to a directory, we fake the Sourcegraph API and index all repos rooted under path.")
 	fs.DurationVar(&rc.interval, "interval", time.Minute, "sync with sourcegraph this often")
-	fs.Int64Var(&rc.indexConcurrency, "index_concurrency", getEnvWithDefaultInt64("SRC_INDEX_CONCURRENCY", 1), "the number of concurrent index jobs to run.")
+	fs.Int64Var(&rc.indexConcurrency, "index_concurrency", getEnvWithDefaultInt64("SRC_INDEX_CONCURRENCY", 1), "the number of repos to index concurrently")
 	fs.StringVar(&rc.index, "index", getEnvWithDefaultString("DATA_DIR", build.DefaultDir), "set index directory to use")
 	fs.StringVar(&rc.listen, "listen", ":6072", "listen on this address.")
-	fs.StringVar(&rc.hostname, "hostname", hostnameBestEffort(), "the name we advertise to Sourcegraph when asking for the list of repositories to index. Can also be set via the NODE_NAME environment variable.")
+	fs.StringVar(&rc.hostname, "hostname", zoekt.HostnameBestEffort(), "the name we advertise to Sourcegraph when asking for the list of repositories to index. Can also be set via the NODE_NAME environment variable.")
 	fs.Float64Var(&rc.cpuFraction, "cpu_fraction", 1.0, "use this fraction of the cores for indexing.")
 	fs.IntVar(&rc.blockProfileRate, "block_profile_rate", getEnvWithDefaultInt("BLOCK_PROFILE_RATE", -1), "Sampling rate of Go's block profiler in nanoseconds. Values <=0 disable the blocking profiler Var(default). A value of 1 includes every blocking event. See https://pkg.go.dev/runtime#SetBlockProfileRate")
 	fs.DurationVar(&rc.backoffDuration, "backoff_duration", getEnvWithDefaultDuration("BACKOFF_DURATION", 10*time.Minute), "for the given duration we backoff from enqueue operations for a repository that's failed its previous indexing attempt. Consecutive failures increase the duration of the delay linearly up to the maxBackoffDuration. A negative value disables indexing backoff.")
 	fs.DurationVar(&rc.maxBackoffDuration, "max_backoff_duration", getEnvWithDefaultDuration("MAX_BACKOFF_DURATION", 120*time.Minute), "the maximum duration to backoff from enqueueing a repo for indexing.  A negative value disables indexing backoff.")
-	fs.BoolVar(&rc.useGRPC, "use_grpc", getEnvWithDefaultBool("GRPC_ENABLED", false), "use the gRPC API to talk to Sourcegraph")
+	fs.BoolVar(&rc.useGRPC, "use_grpc", mustGetBoolFromEnvironmentVariables([]string{"GRPC_ENABLED", "SG_FEATURE_FLAG_GRPC"}, true), "use the gRPC API to talk to Sourcegraph")
 
 	// flags related to shard merging
 	fs.DurationVar(&rc.vacuumInterval, "vacuum_interval", getEnvWithDefaultDuration("SRC_VACUUM_INTERVAL", 24*time.Hour), "run vacuum this often")
@@ -1220,7 +1274,6 @@ func startServer(conf rootConfig) error {
 		go func() {
 			debug.Printf("serving HTTP on %s", conf.listen)
 			log.Fatal(http.ListenAndServe(conf.listen, mux))
-
 		}()
 
 		// Serve mux on a unix domain socket on a best-effort-basis so that
@@ -1248,7 +1301,7 @@ func startServer(conf rootConfig) error {
 				// it.
 				//
 				// See https://github.com/golang/go/issues/11822 for more context.
-				if err := os.Chmod(socket, 0777); err != nil {
+				if err := os.Chmod(socket, 0o777); err != nil {
 					return fmt.Errorf("failed to change permission of socket %s: %w", socket, err)
 				}
 				debug.Printf("serving HTTP on %s", socket)
@@ -1264,7 +1317,7 @@ func startServer(conf rootConfig) error {
 	}
 	go oc.Run()
 
-	logger := sglog.Scoped("metricsRegistration", "")
+	logger := sglog.Scoped("metricsRegistration")
 	opts := mountinfo.CollectorOpts{Namespace: "zoekt_indexserver"}
 
 	c := mountinfo.NewCollector(logger, opts, map[string]string{"indexDir": conf.index})
@@ -1275,6 +1328,8 @@ func startServer(conf rootConfig) error {
 }
 
 func newServer(conf rootConfig) (*Server, error) {
+	logger := sglog.Scoped("server")
+
 	if conf.cpuFraction <= 0.0 || conf.cpuFraction > 1.0 {
 		return nil, fmt.Errorf("cpu_fraction must be between 0.0 and 1.0")
 	}
@@ -1305,12 +1360,12 @@ func newServer(conf rootConfig) (*Server, error) {
 	}
 
 	if _, err := os.Stat(conf.index); err != nil {
-		if err := os.MkdirAll(conf.index, 0755); err != nil {
+		if err := os.MkdirAll(conf.index, 0o755); err != nil {
 			return nil, fmt.Errorf("MkdirAll %s: %v", conf.index, err)
 		}
 	}
 
-	if err := setupTmpDir(conf.Main, conf.index); err != nil {
+	if err := setupTmpDir(logger, conf.Main, conf.index); err != nil {
 		return nil, fmt.Errorf("failed to setup TMPDIR under %s: %v", conf.index, err)
 	}
 
@@ -1340,6 +1395,11 @@ func newServer(conf rootConfig) (*Server, error) {
 		debug.Printf("skipping generating symbols metadata for: %s", joinStringSet(reposShouldSkipSymbolsCalculation, ", "))
 	}
 
+	indexingTimeout := getEnvWithDefaultDuration("INDEXING_TIMEOUT", defaultIndexingTimeout)
+	if indexingTimeout != defaultIndexingTimeout {
+		debug.Printf("using configured indexing timeout: %s", indexingTimeout)
+	}
+
 	var sg Sourcegraph
 	if rootURL.IsAbs() {
 		var batchSize int
@@ -1355,24 +1415,13 @@ func newServer(conf rootConfig) (*Server, error) {
 			WithShouldUseGRPC(conf.useGRPC),
 		}
 
-		gRPCConnectionOptions := []grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithChainStreamInterceptor(internalActorStreamInterceptor()),
-			grpc.WithChainUnaryInterceptor(internalActorUnaryInterceptor()),
-			grpc.WithDefaultServiceConfig(defaultGRPCServiceConfigurationJSON),
-		}
-
-		// This dialer is used to connect via gRPC to the Sourcegraph instance.
-		// This is done lazily, so we can provide the client to use regardless of
-		// whether we enabled gRPC or not initially.
-		cc, err := grpc.Dial(rootURL.Host, gRPCConnectionOptions...)
+		logger := sglog.Scoped("zoektConfigurationGRPCClient")
+		client, err := dialGRPCClient(rootURL.Host, logger)
 		if err != nil {
 			return nil, fmt.Errorf("initializing gRPC connection to %q: %w", rootURL.Host, err)
 		}
 
-		client := proto.NewZoektConfigurationServiceClient(cc)
 		opts = append(opts, WithGRPCClient(client))
-
 		sg = newSourcegraphClient(rootURL, conf.hostname, opts...)
 
 	} else {
@@ -1382,16 +1431,16 @@ func newServer(conf rootConfig) (*Server, error) {
 		}
 	}
 
-	if conf.indexConcurrency < 1 {
-		conf.indexConcurrency = 1
-	}
-
 	cpuCount := int(math.Round(float64(runtime.GOMAXPROCS(0)) * (conf.cpuFraction)))
 	if cpuCount < 1 {
 		cpuCount = 1
 	}
 
-	logger := sglog.Scoped("server", "periodically reindexes enabled repositories on sourcegraph")
+	if conf.indexConcurrency < 1 {
+		conf.indexConcurrency = 1
+	} else if conf.indexConcurrency > int64(cpuCount) {
+		conf.indexConcurrency = int64(cpuCount)
+	}
 
 	q := NewQueue(conf.backoffDuration, conf.maxBackoffDuration, logger)
 
@@ -1416,6 +1465,7 @@ func newServer(conf rootConfig) (*Server, error) {
 			minAgeDays:      conf.minAgeDays,
 			maxPriority:     conf.maxPriority,
 		},
+		timeout: indexingTimeout,
 	}, err
 }
 
@@ -1444,6 +1494,85 @@ func internalActorStreamInterceptor() grpc.StreamClientInterceptor {
 		ctx = metadata.AppendToOutgoingContext(ctx, "X-Sourcegraph-Actor-UID", "internal")
 		return streamer(ctx, desc, cc, method, opts...)
 	}
+}
+
+// defaultGRPCMessageReceiveSizeBytes is the default message size that gRPCs servers and clients are allowed to process.
+// This can be overridden by providing custom Server/Dial options.
+const defaultGRPCMessageReceiveSizeBytes = 90 * 1024 * 1024 // 90 MB
+
+func dialGRPCClient(addr string, logger sglog.Logger, additionalOpts ...grpc.DialOption) (proto.ZoektConfigurationServiceClient, error) {
+	metrics := mustGetClientMetrics()
+
+	// If the service seems to be unavailable, this
+	// will retry after [1s, 2s, 4s, 8s, 16s] with a jitterFraction of .1
+	// Ex: (on the first retry attempt, we will wait between [.9s and 1.1s])
+	retryOpts := []retry.CallOption{
+		retry.WithMax(5),
+		retry.WithBackoff(retry.BackoffExponentialWithJitter(1*time.Second, .1)),
+		retry.WithCodes(codes.Unavailable),
+	}
+
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainStreamInterceptor(
+			metrics.StreamClientInterceptor(),
+			messagesize.StreamClientInterceptor,
+			internalActorStreamInterceptor(),
+			internalerrs.LoggingStreamClientInterceptor(logger),
+			internalerrs.PrometheusStreamClientInterceptor,
+			retry.StreamClientInterceptor(retryOpts...),
+		),
+		grpc.WithChainUnaryInterceptor(
+			metrics.UnaryClientInterceptor(),
+			messagesize.UnaryClientInterceptor,
+			internalActorUnaryInterceptor(),
+			internalerrs.LoggingUnaryClientInterceptor(logger),
+			internalerrs.PrometheusUnaryClientInterceptor,
+			retry.UnaryClientInterceptor(retryOpts...),
+		),
+		grpc.WithDefaultServiceConfig(defaultGRPCServiceConfigurationJSON),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(defaultGRPCMessageReceiveSizeBytes)),
+	}
+
+	opts = append(opts, additionalOpts...)
+
+	// Ensure that the message size options are set last, so they override any other
+	// client-specific options that tweak the message size.
+	//
+	// The message size options are only provided if the environment variable is set. These options serve as an escape hatch, so they
+	// take precedence over everything else with a uniform size setting that's easy to reason about.
+	opts = append(opts, messagesize.MustGetClientMessageSizeFromEnv()...)
+
+	// This dialer is used to connect via gRPC to the Sourcegraph instance.
+	// This is done lazily, so we can provide the client to use regardless of
+	// whether we enabled gRPC or not initially.
+	cc, err := grpc.Dial(addr, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("dialing %q: %w", addr, err)
+	}
+
+	client := proto.NewZoektConfigurationServiceClient(cc)
+	return client, nil
+}
+
+// mustGetClientMetrics returns a singleton instance of the client metrics
+// that are shared across all gRPC clients that this process creates.
+//
+// This function panics if the metrics cannot be registered with the default
+// Prometheus registry.
+func mustGetClientMetrics() *grpcprom.ClientMetrics {
+	clientMetricsOnce.Do(func() {
+		clientMetrics = grpcprom.NewClientMetrics(
+			grpcprom.WithClientCounterOptions(),
+			grpcprom.WithClientHandlingTimeHistogram(), // record the overall request latency for a gRPC request
+			grpcprom.WithClientStreamRecvHistogram(),   // record how long it takes for a client to receive a message during a streaming RPC
+			grpcprom.WithClientStreamSendHistogram(),   // record how long it takes for a client to send a message during a streaming RPC
+		)
+
+		prometheus.DefaultRegisterer.MustRegister(clientMetrics)
+	})
+
+	return clientMetrics
 }
 
 // addDefaultPort adds a default port to a URL if one is not specified.
@@ -1495,11 +1624,44 @@ func main() {
 	liblog := sglog.Init(sglog.Resource{
 		Name:       "zoekt-indexserver",
 		Version:    zoekt.Version,
-		InstanceID: hostnameBestEffort(),
+		InstanceID: zoekt.HostnameBestEffort(),
 	})
 	defer liblog.Sync()
 
 	if err := rootCmd().ParseAndRun(context.Background(), os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// mustGetBoolFromEnvironmentVariables is like getBoolFromEnvironmentVariables, but it panics
+// if any of the provided environment variables fails to parse as a boolean.
+func mustGetBoolFromEnvironmentVariables(envVarNames []string, defaultBool bool) bool {
+	value, err := getBoolFromEnvironmentVariables(envVarNames, defaultBool)
+	if err != nil {
+		panic(err)
+	}
+
+	return value
+}
+
+// getBoolFromEnvironmentVariables returns the boolean defined by the first environment
+// variable listed in envVarNames that is set in the current process environment, or the defaultBool if none are set.
+//
+// An error is returned of the provided environment variables fails to parse as a boolean.
+func getBoolFromEnvironmentVariables(envVarNames []string, defaultBool bool) (bool, error) {
+	for _, envVar := range envVarNames {
+		v := os.Getenv(envVar)
+		if v == "" {
+			continue
+		}
+
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return false, fmt.Errorf("parsing environment variable %q to boolean: %v", envVar, err)
+		}
+
+		return b, nil
+	}
+
+	return defaultBool, nil
 }

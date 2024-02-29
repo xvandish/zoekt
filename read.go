@@ -288,18 +288,9 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 		return nil, err
 	}
 
-	if os.Getenv("ZOEKT_DISABLE_BTREE") != "" {
-		offsetMap, err := d.readNgrams(toc)
-		if err != nil {
-			return nil, err
-		}
-		d.ngrams = offsetMap
-	} else {
-		bt, err := d.newBtreeIndex(toc.ngramText, toc.postings)
-		if err != nil {
-			return nil, err
-		}
-		d.ngrams = bt
+	d.contentNgrams, err = d.newBtreeIndex(toc.ngramText, toc.postings)
+	if err != nil {
+		return nil, err
 	}
 
 	d.fileBranchMasks, err = readSectionU64(d.file, toc.branchMasks)
@@ -314,11 +305,7 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 
 	d.fileNameIndex = toc.fileNames.relativeIndex()
 
-	if os.Getenv("ZOEKT_DISABLE_BTREE") != "" {
-		d.fileNameNgrams.m, err = d.readFileNameNgrams(toc)
-	} else {
-		d.fileNameNgrams.bt, err = d.newBtreeIndex(toc.nameNgramText, toc.namePostings)
-	}
+	d.fileNameNgrams, err = d.newBtreeIndex(toc.nameNgramText, toc.namePostings)
 	if err != nil {
 		return nil, err
 	}
@@ -341,11 +328,7 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 		return nil, err
 	}
 
-	if os.Getenv("ZOEKT_ENABLE_LAZY_DOC_SECTIONS") != "" {
-		d.runeDocSectionsRaw = blob
-	} else {
-		d.runeDocSections = unmarshalDocSections(blob, nil)
-	}
+	d.runeDocSections = unmarshalDocSections(blob, nil)
 
 	var runeOffsets, fileNameRuneOffsets []uint32
 
@@ -460,26 +443,6 @@ func (r *reader) readMetadata(toc *indexTOC) ([]*Repository, *IndexMetadata, err
 
 const ngramEncoding = 8
 
-func (d *indexData) readNgrams(toc *indexTOC) (combinedNgramOffset, error) {
-	textContent, err := d.readSectionBlob(toc.ngramText)
-	if err != nil {
-		return combinedNgramOffset{}, err
-	}
-	postingsIndex := toc.postings.relativeIndex()
-
-	for i := 0; i < len(postingsIndex); i++ {
-		postingsIndex[i] += toc.postings.data.off
-	}
-
-	ngrams := make([]ngram, 0, len(textContent)/ngramEncoding)
-	for i := 0; i < len(textContent); i += ngramEncoding {
-		ng := ngram(binary.BigEndian.Uint64(textContent[i : i+ngramEncoding]))
-		ngrams = append(ngrams, ng)
-	}
-
-	return makeCombinedNgramOffset(ngrams, postingsIndex), nil
-}
-
 func (d *indexData) newBtreeIndex(ngramSec simpleSection, postings compoundSection) (btreeIndex, error) {
 	bi := btreeIndex{file: d.file}
 
@@ -505,31 +468,6 @@ func (d *indexData) newBtreeIndex(ngramSec simpleSection, postings compoundSecti
 	bi.postingIndex = postings.index
 
 	return bi, nil
-}
-
-func (d *indexData) readFileNameNgrams(toc *indexTOC) (map[ngram][]byte, error) {
-	nameNgramText, err := d.readSectionBlob(toc.nameNgramText)
-	if err != nil {
-		return nil, err
-	}
-
-	fileNamePostingsData, err := d.readSectionBlob(toc.namePostings.data)
-	if err != nil {
-		return nil, err
-	}
-
-	fileNamePostingsIndex := toc.namePostings.relativeIndex()
-
-	fileNameNgrams := make(map[ngram][]byte, len(nameNgramText)/ngramEncoding)
-	for i := 0; i < len(nameNgramText); i += ngramEncoding {
-		j := i / ngramEncoding
-		off := fileNamePostingsIndex[j]
-		end := fileNamePostingsIndex[j+1]
-		ng := ngram(binary.BigEndian.Uint64(nameNgramText[i : i+ngramEncoding]))
-		fileNameNgrams[ng] = fileNamePostingsData[off:end]
-	}
-
-	return fileNameNgrams, nil
 }
 
 func (d *indexData) verify() error {
@@ -594,7 +532,15 @@ func (d *indexData) readDocSections(i uint32, buf []DocumentSection) ([]Document
 		return nil, 0, err
 	}
 
-	return unmarshalDocSections(blob, buf), sec.sz, nil
+	ds := unmarshalDocSections(blob, buf)
+
+	// can be nil if buf is nil and there are no doc sections. However, we rely
+	// on it being non-nil to cache the read.
+	if ds == nil {
+		ds = make([]DocumentSection, 0)
+	}
+
+	return ds, sec.sz, nil
 }
 
 func (d *indexData) readRanks(toc *indexTOC) error {
@@ -713,11 +659,8 @@ func PrintNgramStats(r IndexFile) error {
 		return err
 	}
 
-	if id.ngrams == nil {
-		return fmt.Errorf("PrintNgramStats: ngrams=nil")
-	}
 	var rNgram [3]rune
-	for ngram, ss := range id.ngrams.DumpMap() {
+	for ngram, ss := range id.contentNgrams.DumpMap() {
 		rNgram = ngramToRunes(ngram)
 		fmt.Printf("%d\t%q\n", ss.sz, string(rNgram[:]))
 	}

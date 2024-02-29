@@ -58,7 +58,6 @@ func TestReadWrite(t *testing.T) {
 
 	var toc indexTOC
 	err = r.readTOC(&toc)
-
 	if err != nil {
 		t.Errorf("got read error %v", err)
 	}
@@ -74,12 +73,13 @@ func TestReadWrite(t *testing.T) {
 		t.Errorf("got filename %q, want %q", got, "filename")
 	}
 
-	if len(data.ngrams.DumpMap()) != 3 {
-		t.Fatalf("got ngrams %v, want 3 ngrams", data.ngrams)
+	contentNgrams := data.contentNgrams.DumpMap()
+	if len(contentNgrams) != 3 {
+		t.Fatalf("got ngrams %v, want 3 ngrams", contentNgrams)
 	}
 
-	if sec := data.ngrams.Get(stringToNGram("bcq")); sec.sz > 0 {
-		t.Errorf("found ngram bcq (%v) in %v", uint64(stringToNGram("bcq")), data.ngrams)
+	if sec := data.contentNgrams.Get(stringToNGram("bcq")); sec.sz > 0 {
+		t.Errorf("found ngram bcq (%v) in %v", uint64(stringToNGram("bcq")), contentNgrams)
 	}
 }
 
@@ -117,12 +117,12 @@ func TestReadWriteNames(t *testing.T) {
 		t.Errorf("got index %v, want {0,4}", data.fileNameIndex)
 	}
 
-	gotBlob, err := data.fileNameNgrams.GetBlob(stringToNGram("bCd"))
+	gotSec := data.fileNameNgrams.Get(stringToNGram("bCd"))
 	if err != nil {
 		t.Fatalf("fileNameNgrams.GetBlob: %v", err)
 	}
 
-	if !reflect.DeepEqual(gotBlob, []byte{1}) {
+	if !reflect.DeepEqual(buf.Bytes()[gotSec.off:gotSec.off+gotSec.sz], []byte{1}) {
 		t.Errorf("got trigram bcd at bits %v, want sz 2", data.fileNameNgrams)
 	}
 }
@@ -193,7 +193,7 @@ func TestGet(t *testing.T) {
 
 	for _, tt := range cases {
 		t.Run(tt.ng, func(t *testing.T) {
-			havePostingList := id.ngrams.Get(stringToNGram(tt.ng))
+			havePostingList := id.contentNgrams.Get(stringToNGram(tt.ng))
 			if !reflect.DeepEqual(tt.wantPostingList, havePostingList) {
 				t.Fatalf("\nwant:%+v\ngot: %+v", tt.wantPostingList, havePostingList)
 			}
@@ -271,7 +271,7 @@ func TestReadSearch(t *testing.T) {
 			if raw, err := json.MarshalIndent(got, "", "  "); err != nil {
 				t.Errorf("failed marshalling search results for %s during updating: %v", name, err)
 				continue
-			} else if err := os.WriteFile(golden, raw, 0644); err != nil {
+			} else if err := os.WriteFile(golden, raw, 0o644); err != nil {
 				t.Errorf("failed writing search results for %s during updating: %v", name, err)
 				continue
 			}
@@ -375,7 +375,7 @@ func TestBackwardsCompat(t *testing.T) {
 		outname := fmt.Sprintf("testdata/backcompat/new_v%d.%05d.zoekt", IndexFormatVersion, 0)
 		t.Log("writing new file", outname)
 
-		err = os.WriteFile(outname, buf.Bytes(), 0644)
+		err = os.WriteFile(outname, buf.Bytes(), 0o644)
 		if err != nil {
 			t.Fatalf("Creating output file: %v", err)
 		}
@@ -401,7 +401,6 @@ func TestBackwardsCompat(t *testing.T) {
 
 				var toc indexTOC
 				err = r.readTOC(&toc)
-
 				if err != nil {
 					t.Errorf("got read error %v", err)
 				}
@@ -417,12 +416,13 @@ func TestBackwardsCompat(t *testing.T) {
 					t.Errorf("got filename %q, want %q", got, "filename")
 				}
 
-				if len(data.ngrams.DumpMap()) != 3 {
-					t.Fatalf("got ngrams %v, want 3 ngrams", data.ngrams)
+				contentNgrams := data.contentNgrams.DumpMap()
+				if len(data.contentNgrams.DumpMap()) != 3 {
+					t.Fatalf("got ngrams %v, want 3 ngrams", contentNgrams)
 				}
 
-				if sec := data.ngrams.Get(stringToNGram("bcq")); sec.sz > 0 {
-					t.Errorf("found ngram bcd in %v", data.ngrams)
+				if sec := data.contentNgrams.Get(stringToNGram("bcq")); sec.sz > 0 {
+					t.Errorf("found ngram bcd in %v", contentNgrams)
 				}
 			},
 		)
