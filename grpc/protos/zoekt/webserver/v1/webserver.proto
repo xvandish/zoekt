@@ -111,6 +111,17 @@ message SearchOptions {
   // Currently, this treats each match in a file as a term and computes an approximation to BM25.
   // When enabled, all other scoring signals are ignored, including document ranks.
   bool use_keyword_scoring = 15;
+
+  // If true, SearchResult.RepoURLs and SearchResults.LineFragments are not computed and are
+  // excluded from results.
+  // This is useful for deployments of zoekt for a single host, where you can create the
+  // repoURL elsewhere is just from the repository name
+  bool exclude_repo_urls_and_line_fragments = 17;
+
+
+  // Replace HEAD with in fileMatch.Branches with Repository.HEADRevParsedName,
+  // if it is not empty
+  bool sawp_head_in_branches_with_rev_parsed_name = 18;
 }
 
 message ListRequest {
