@@ -55,7 +55,7 @@ var (
 	muIndexAndDataDirs indexMutex
 )
 
-// var tracer trace.Tracer
+var tracer trace.Tracer
 
 func init() {
 	resource := sglog.Resource{
@@ -64,6 +64,7 @@ func init() {
 		InstanceID: zoekt.HostnameBestEffort(),
 	}
 	internalTracer.Init(resource)
+	tracer = otel.Tracer("cmd/zoekt-indexserver")
 }
 
 func loggedRun(ctx context.Context, cmd *exec.Cmd) (out, err []byte) {
@@ -72,7 +73,6 @@ func loggedRun(ctx context.Context, cmd *exec.Cmd) (out, err []byte) {
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:loggedRun")
 	ctx, span := tracer.Start(
 		ctx,
 		"loggedRun",
@@ -182,7 +182,6 @@ func periodicBackup(ctx context.Context, dataDir, indexDir string, opts *Options
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:periodicBackup")
 	ctx, span := tracer.Start(
 		ctx,
 		"periodicBackup",
@@ -224,7 +223,6 @@ func indexPendingRepos(ctx context.Context, indexDir, repoDir string, opts *Opti
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:indexPendingRepos")
 	ctx, span := tracer.Start(
 		ctx,
 		"indexPendingRepos",
@@ -275,7 +273,6 @@ func indexPendingRepo(ctx context.Context, dir, indexDir, repoDir string, opts *
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:indexPendingRepo")
 	ctx, span := tracer.Start(
 		ctx,
 		"indexPendingRepo",
@@ -307,7 +304,6 @@ func deleteLogs(ctx context.Context, logDir string, maxAge time.Duration) {
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:deleteLogs")
 	ctx, span := tracer.Start(
 		ctx,
 		"deleteLogs",
@@ -337,7 +333,6 @@ func deleteLogsLoop(ctx context.Context, logDir string, maxAge time.Duration) {
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:deleteLogsLoop")
 	ctx, span := tracer.Start(
 		ctx,
 		"deleteLogsLoop",
@@ -361,7 +356,6 @@ func deleteIfOrphan(ctx context.Context, repoDir string, fn string) error {
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:deleteIfOrphan")
 	ctx, span := tracer.Start(
 		ctx,
 		"deleteIfOrphan",
@@ -418,7 +412,6 @@ func deleteOrphanIndexes(ctx context.Context, indexDir, repoDir string, watchInt
 		}
 
 		// work begins
-		tracer := otel.Tracer("func:deleteOrphanIndexes")
 		ctx, span := tracer.Start(
 			ctx,
 			"deleteOrphanIndexes",
@@ -464,7 +457,6 @@ func main() {
 	otel.SetTracerProvider(tracerProvider)
 
 	// work begins
-	tracer := otel.Tracer("func:main")
 	ctx, span := tracer.Start(ctx, "main")
 	// end span once done with func
 	defer span.End()

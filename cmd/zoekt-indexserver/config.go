@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -82,7 +81,6 @@ func isHTTP(ctx context.Context, u string) bool {
 		attribute.String("url", u),
 	}
 
-	tracer := otel.Tracer("func:isHTTP")
 	ctx, span := tracer.Start(
 		ctx,
 		"isHTTP",
@@ -101,7 +99,6 @@ func readConfigURL(ctx context.Context, u string) ([]ConfigEntry, error) {
 		attribute.String("url", u),
 	}
 
-	tracer := otel.Tracer("func:readConfigURL")
 	ctx, span := tracer.Start(
 		ctx,
 		"readConfigURL",
@@ -138,7 +135,6 @@ func watchFile(ctx context.Context, path string) (<-chan struct{}, error) {
 		attribute.String("path", path),
 	}
 
-	tracer := otel.Tracer("func:watchFile")
 	ctx, span := tracer.Start(
 		ctx,
 		"watchFile",
@@ -184,7 +180,6 @@ func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pend
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:periodicMirrorFile")
 	ctx, span := tracer.Start(
 		ctx,
 		"periodicMirrorFile",
@@ -228,7 +223,6 @@ func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pend
 
 func createGithubArgsMirrorAndFetchArgs(ctx context.Context, c ConfigEntry) []string {
 	// work begins
-	tracer := otel.Tracer("func:createGithubArgsMirrorAndFetchArgs")
 	ctx, span := tracer.Start(ctx, "createGithubArgsMirrorAndFetchArgs")
 
 	// end span once done with func
@@ -283,7 +277,6 @@ func executeMirror(ctx context.Context, cfg []ConfigEntry, repoDir string, paral
 	}
 
 	// work begins
-	tracer := otel.Tracer("func:executeMirror")
 	ctx, span := tracer.Start(
 		ctx,
 		"executeMirror",
