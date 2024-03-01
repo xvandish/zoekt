@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/xvandish/zoekt/gitindex"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
@@ -26,6 +27,7 @@ func periodicFetch(ctx context.Context, repoDir, indexDir string, opts *Options,
 		attribute.String("indexDir", indexDir),
 	}
 	// create new span
+	tracer := otel.Tracer("func:periodicFetch")
 	ctx, span := tracer.Start(
 		ctx,
 		"periodicFetch",
@@ -49,6 +51,7 @@ func callGetReposModifiedSinceForCfgs(ctx context.Context, cfgs []ConfigEntry, l
 		attribute.String("lookbackInterval", lookbackInterval.String()),
 	}
 	// create new span
+	tracer := otel.Tracer("func:callGetReposModifiedSinceForCfgs")
 	ctx, span := tracer.Start(
 		ctx,
 		"callGetReposModifiedSinceForCfgs",
@@ -90,6 +93,7 @@ func processReposToFetchAndIndex(ctx context.Context, reposToFetchAndIndex []str
 		attribute.Int("parallelFetches", parallelFetches),
 	}
 	// create new span
+	tracer := otel.Tracer("func:processReposToFetchAndIndex")
 	ctx, span := tracer.Start(
 		ctx,
 		"processReposToFetchAndIndex",
@@ -133,6 +137,7 @@ func writeFetchTimeToFile(ctx context.Context, repoDir string, t time.Time) {
 		attribute.String("time", t.String()),
 	}
 	// create new span
+	tracer := otel.Tracer("func:writeFetchTimeToFile")
 	_, span := tracer.Start(
 		ctx,
 		"writeFetchTimeToFile",
@@ -156,6 +161,7 @@ func readFetchTimeFromFile(ctx context.Context, repoDir string) (time.Time, erro
 		attribute.String("repoDir", repoDir),
 	}
 	// create new span
+	tracer := otel.Tracer("func:readFetchTimeFromFile")
 	_, span := tracer.Start(
 		ctx,
 		"readFetchTimeFromFile",
@@ -197,6 +203,7 @@ func getLookbackWindowStart(ctx context.Context, repoDir string, fetchInterval t
 		attribute.String("fetchInterval", fetchInterval.String()),
 	}
 	// create new span
+	tracer := otel.Tracer("func:getLookbackWindowStart")
 	_, span := tracer.Start(
 		ctx,
 		"getLookbackWindowStart",
@@ -245,6 +252,7 @@ func isDuringWorkHours(ctx context.Context, timeToCheck time.Time, startHour, en
 		attribute.String("zone", zone.String()),
 	}
 	// create new span
+	tracer := otel.Tracer("func:isDuringWorkHours")
 	_, span := tracer.Start(
 		ctx,
 		"isDuringWorkHours",
@@ -261,6 +269,7 @@ func workingHoursEnabled(ctx context.Context, opts *Options) bool {
 		attribute.Int("workingHoursStart", opts.workingHoursStart),
 	}
 	// create new span
+	tracer := otel.Tracer("func:workingHoursEnabled")
 	_, span := tracer.Start(
 		ctx,
 		"workingHoursEnabled",
@@ -277,6 +286,7 @@ func periodicSmartGHFetchV2(ctx context.Context, repoDir, indexDir string, opts 
 		attribute.String("repoDir", repoDir),
 	}
 	// create new span
+	tracer := otel.Tracer("func:periodicSmartGHFetchV2")
 	_, span := tracer.Start(
 		ctx,
 		"periodicSmartGHFetchV2",
@@ -343,6 +353,7 @@ func gitFetchNeededRepos(ctx context.Context, repoDir, indexDir string, opts *Op
 		attribute.String("indexDir", indexDir),
 	}
 	// create new span
+	tracer := otel.Tracer("func:gitFetchNeededRepos")
 	_, span := tracer.Start(
 		ctx,
 		"gitFetchNeededRepos",
@@ -414,6 +425,7 @@ func fetchGitRepo(ctx context.Context, dir string) bool {
 		attribute.String("dir", dir),
 	}
 	// create new span
+	tracer := otel.Tracer("func:fetchGitRepo")
 	_, span := tracer.Start(
 		ctx,
 		"fetchGitRepo",
