@@ -62,6 +62,7 @@ func loggedRun(tr *internalTrace.Trace, cmd *exec.Cmd) (out, err []byte) {
 	cmd.Stderr = errBuf
 
 	log.Printf("run %v", cmd.Args)
+	tr.LazyPrintf("%s", cmd.Args)
 
 	if err := cmd.Run(); err != nil {
 		tr.LazyPrintf("failed: %v", errBuf.String())
