@@ -42,11 +42,6 @@ func callGetReposModifiedSinceForCfgs(ctx context.Context, cfgs []ConfigEntry, l
 	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.callGetReposModifiedSinceForCfgs", "")
 	defer trace.Finish()
 
-	trace.LogFields(
-		openTracingLog.String("repoDir", repoDir),
-		openTracingLog.String("lookbackInterval", lookbackInterval.String()),
-	)
-
 	var reposToFetchAndIndex []string
 	for _, c := range cfgs {
 		var cmd *exec.Cmd

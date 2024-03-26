@@ -238,12 +238,6 @@ func indexPendingRepo(ctx context.Context, dir, indexDir, repoDir string, opts *
 	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.indexPendingRepo", "")
 	defer trace.Finish()
 
-	trace.LogFields(
-		openTracingLog.String("dir", dir),
-		openTracingLog.String("indexDir", indexDir),
-		openTracingLog.String("repoDir", repoDir),
-	)
-
 	ctx, cancel := context.WithTimeout(ctx, opts.indexTimeout)
 	defer cancel()
 	args := []string{

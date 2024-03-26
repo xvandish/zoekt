@@ -277,12 +277,6 @@ func executeMirror(ctx context.Context, cfg []ConfigEntry, repoDir string, paral
 	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.executeMirror", "")
 	defer trace.Finish()
 
-	trace.LogFields(
-		openTracingLog.String("repoDir", repoDir),
-		openTracingLog.Int("parallelListApiReqs", parallelListApiReqs),
-		openTracingLog.Int("parallelClones", parallelClones),
-	)
-
 	// Randomize the ordering in which we query
 	// things. This is to ensure that quota limits don't
 	// always hit the last one in the list.
