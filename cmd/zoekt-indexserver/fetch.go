@@ -12,32 +12,45 @@ import (
 	"sync"
 	"time"
 
+	openTracingLog "github.com/opentracing/opentracing-go/log"
 	"github.com/xvandish/zoekt/gitindex"
+	internalTrace "github.com/xvandish/zoekt/trace"
 	"golang.org/x/sync/errgroup"
 )
 
 // finds all git repos available, and calls git fetch on them
 // it does so in parallel, with opts.parallelFetches as the bound
-func periodicFetch(repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
+func periodicFetch(ctx context.Context, repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicFetch", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
+
 	t := time.NewTicker(opts.fetchInterval)
 	lastBruteReindex := time.Now()
 	for {
 		fmt.Printf("starting periodicFetch\n")
-		lastBruteReindex = gitFetchNeededRepos(repoDir, indexDir, opts, pendingRepos, lastBruteReindex)
+		lastBruteReindex = gitFetchNeededRepos(ctx, repoDir, indexDir, opts, pendingRepos, lastBruteReindex)
 		<-t.C
 	}
 }
 
-func callGetReposModifiedSinceForCfgs(cfgs []ConfigEntry, lookbackInterval time.Time, repoDir string) []string {
+func callGetReposModifiedSinceForCfgs(ctx context.Context, cfgs []ConfigEntry, lookbackInterval time.Time, repoDir string) []string {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.callGetReposModifiedSinceForCfgs", "")
+	defer trace.Finish()
+
 	var reposToFetchAndIndex []string
 	for _, c := range cfgs {
 		var cmd *exec.Cmd
 		cmd = exec.Command("zoekt-github-get-repos-modified-since",
 			"-dest", repoDir)
-		cmd.Args = append(cmd.Args, createGithubArgsMirrorAndFetchArgs(c)...)
+		cmd.Args = append(cmd.Args, createGithubArgsMirrorAndFetchArgs(ctx, c)...)
 		cmd.Args = append(cmd.Args, "-since", lookbackInterval.Format(iso8601Format))
 
-		stdout, _ := loggedRun(cmd)
+		stdout, _ := loggedRun(trace, cmd)
 		reposPushed := 0
 		for _, fn := range bytes.Split(stdout, []byte{'\n'}) {
 			if len(fn) == 0 {
@@ -50,17 +63,30 @@ func callGetReposModifiedSinceForCfgs(cfgs []ConfigEntry, lookbackInterval time.
 		fmt.Printf("%v - there are %d repos to fetch and index\n", cmd.Args, reposPushed)
 	}
 
+	// add list of repos to trace
+	trace.LogFields(
+		openTracingLog.String("reposToFetchAndIndex", strings.Join(reposToFetchAndIndex, ",")),
+	)
+
 	return reposToFetchAndIndex
 }
 
-func processReposToFetchAndIndex(reposToFetchAndIndex []string, parallelFetches int, pendingRepos chan<- string) {
+func processReposToFetchAndIndex(ctx context.Context, reposToFetchAndIndex []string, parallelFetches int, pendingRepos chan<- string) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.processReposToFetchAndIndex", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("reposToFetchAndIndex", strings.Join(reposToFetchAndIndex, ",")),
+		openTracingLog.Int("parallelFetches", parallelFetches),
+	)
+
 	g, _ := errgroup.WithContext(context.Background())
 	g.SetLimit(parallelFetches)
 	for _, dir := range reposToFetchAndIndex {
 		dir := dir
 		g.Go(func() error {
 			ran := muIndexAndDataDirs.With(dir, func() {
-				if hasUpdate := fetchGitRepo(dir); !hasUpdate {
+				if hasUpdate := fetchGitRepo(ctx, dir); !hasUpdate {
 					fmt.Printf("ERROR: we mistakenly thought %s had an update. Check smartGH logic\n", dir)
 				} else {
 					fmt.Printf("dir=%s has update\n", dir)
@@ -83,27 +109,61 @@ func processReposToFetchAndIndex(reposToFetchAndIndex []string, parallelFetches 
 // The next run, should read the previous run time. If the previous time is < (now-fetchInterval-fetchInterval)
 // then we use it
 
-func writeFetchTimeToFile(repoDir string, t time.Time) {
+func writeFetchTimeToFile(ctx context.Context, repoDir string, t time.Time) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.writeFetchTimeToFile", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("time", t.String()),
+	)
+
 	f := filepath.Join(repoDir, "time-of-last-update.txt")
+
+	trace.LogFields(
+		openTracingLog.String("file-path", f),
+	)
+
 	err := os.WriteFile(f, []byte(t.Format(iso8601Format)), 0644)
 	if err != nil {
+		trace.SetError(err)
 		fmt.Printf("error writing time to file: %v\n", err)
 	}
 }
 
-func readFetchTimeFromFile(repoDir string) (time.Time, error) {
+func readFetchTimeFromFile(ctx context.Context, repoDir string) (time.Time, error) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.readFetchTimeFromFile", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+	)
+
 	f := filepath.Join(repoDir, "time-of-last-update.txt")
+	trace.LogFields(
+		openTracingLog.String("file-path", f),
+	)
+
 	bytes, err := os.ReadFile(f)
 	if err != nil {
+		trace.SetError(err)
 		fmt.Printf("error reading fetchTime from file: %v\n", err)
 		return time.Time{}, err
 	}
+
 	lastLookbackIntervalStart := strings.TrimSpace(string(bytes))
+
 	p, err := time.Parse(iso8601Format, lastLookbackIntervalStart)
 	if err != nil {
+		trace.SetError(err)
 		fmt.Printf("error reading fetchTime from file: %v\n", err)
 		return time.Time{}, err
 	}
+
+	trace.LogFields(
+		openTracingLog.String("time", p.String()),
+	)
+
 	return p, nil
 }
 
@@ -115,18 +175,33 @@ const dayAgo = 24 * time.Hour
 // have been updated since. In the case that that time is > fetchInterval ago,
 // we also return a newer timeToWrite that will be written to the file. This prevents an
 // endless loop, which I will explain later...
-func getLookbackWindowStart(repoDir string, fetchInterval time.Duration) (time.Time, time.Time) {
+func getLookbackWindowStart(ctx context.Context, repoDir string, fetchInterval time.Duration) (time.Time, time.Time) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.getLookbackWindowStart", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("fetchInterval", fetchInterval.String()),
+	)
+
 	now := time.Now()
 	lookbackIntervalStart := now.Add(-fetchInterval)
+	trace.LogFields(
+		openTracingLog.String("lookbackIntervalStart", lookbackIntervalStart.String()),
+	)
 
 	// if there is an error reading the previousLookbackInterval
-	prevLookbackIntervalStart, err := readFetchTimeFromFile(repoDir)
+	prevLookbackIntervalStart, err := readFetchTimeFromFile(ctx, repoDir)
 	if err != nil { // no file exists, or format wrong
+		trace.SetError(err)
 		fmt.Printf("using a 24 hour lookback window.\n")
 		return now, lookbackIntervalStart.Add(time.Duration(-24) * time.Hour)
 	}
 
 	diff := lookbackIntervalStart.Sub(prevLookbackIntervalStart)
+	trace.LogFields(
+		openTracingLog.String("diff", diff.String()),
+	)
 
 	// this should never happen. If it does, we have a problem, most likely in the
 	// file writing phase
@@ -145,17 +220,45 @@ func getLookbackWindowStart(repoDir string, fetchInterval time.Duration) (time.T
 	return now, lookbackIntervalStart
 }
 
-func isDuringWorkHours(timeToCheck time.Time, startHour, endHour int, zone *time.Location) bool {
+func isDuringWorkHours(ctx context.Context, timeToCheck time.Time, startHour, endHour int, zone *time.Location) bool {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.isDuringWorkHours", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("timeToCheck", timeToCheck.String()),
+		openTracingLog.Int("startHour", startHour),
+		openTracingLog.Int("endHour", endHour),
+		openTracingLog.String("zone", zone.String()),
+	)
+
 	currHour := timeToCheck.In(zone).Hour()
+	trace.LogFields(
+		openTracingLog.Int("currHour", currHour),
+	)
+
 	return currHour >= startHour && currHour <= endHour
 }
-func workingHoursEnabled(opts *Options) bool {
+func workingHoursEnabled(ctx context.Context, opts *Options) bool {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.workingHoursEnabled", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.Int("workingHoursStart", opts.workingHoursStart),
+	)
+
 	return opts.workingHoursStart >= 0
 }
 
-func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
+func periodicSmartGHFetchV2(ctx context.Context, repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicSmartGHFetchV2", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+	)
+
 	currInterval := opts.fetchInterval
-	if workingHoursEnabled(opts) && !isDuringWorkHours(time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
+	if workingHoursEnabled(ctx, opts) && !isDuringWorkHours(ctx, time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
 		currInterval = opts.fetchIntervalSlow
 		fmt.Printf("not during working hours. Starting interval is %s\n", opts.fetchIntervalSlow)
 	}
@@ -164,33 +267,34 @@ func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepo
 	lastBruteReindex := time.Now()
 
 	for {
-		timeToWrite, lookbackIntervalStart := getLookbackWindowStart(repoDir, currInterval)
+		timeToWrite, lookbackIntervalStart := getLookbackWindowStart(ctx, repoDir, currInterval)
 		fmt.Printf("lookbackIntervalStart=%s\n", lookbackIntervalStart.String())
 
 		if time.Since(lastBruteReindex) >= opts.bruteReindexInterval {
 			fmt.Printf("bruteReindexing\n")
-			lastBruteReindex = gitFetchNeededRepos(repoDir, indexDir, opts, pendingRepos, lastBruteReindex)
+			lastBruteReindex = gitFetchNeededRepos(ctx, repoDir, indexDir, opts, pendingRepos, lastBruteReindex)
 			continue
 		}
 
-		cfg, err := readConfigURL(opts.mirrorConfigFile)
+		cfg, err := readConfigURL(ctx, opts.mirrorConfigFile)
 		if err != nil {
 			// we'd have a lot of problems anyways, so just error out
+			trace.SetError(err)
 			fmt.Printf("ERROR: can't read configUrl: %v\n", err)
 			continue
 		}
 
 		// for every config, call github-thing
-		reposToFetchAndIndex := callGetReposModifiedSinceForCfgs(cfg, lookbackIntervalStart, repoDir)
-		processReposToFetchAndIndex(reposToFetchAndIndex, opts.parallelFetches, pendingRepos)
+		reposToFetchAndIndex := callGetReposModifiedSinceForCfgs(ctx, cfg, lookbackIntervalStart, repoDir)
+		processReposToFetchAndIndex(ctx, reposToFetchAndIndex, opts.parallelFetches, pendingRepos)
 
-		writeFetchTimeToFile(repoDir, timeToWrite)
+		writeFetchTimeToFile(ctx, repoDir, timeToWrite)
 
 		// this code has a bit of an issue. If fetchIntervalSlow is much slower, than it's possible
 		// that the entire fetchIntervalSlow elapses before we switch back to the faster fetchInterval.
 		// As I'm planning on using only a 10min slow interval, this is a problem for later.
-		if workingHoursEnabled(opts) {
-			if isDuringWorkHours(time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
+		if workingHoursEnabled(ctx, opts) {
+			if isDuringWorkHours(ctx, time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
 				t.Reset(opts.fetchInterval)
 				currInterval = opts.fetchInterval
 			} else {
@@ -205,10 +309,19 @@ func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepo
 
 }
 
-func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos chan<- string, lastBruteReindex time.Time) time.Time {
+func gitFetchNeededRepos(ctx context.Context, repoDir, indexDir string, opts *Options, pendingRepos chan<- string, lastBruteReindex time.Time) time.Time {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.gitFetchNeededRepos", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
+
 	fmt.Printf("running gitFetchNeededRepos\n")
 	repos, err := gitindex.FindGitRepos(repoDir)
 	if err != nil {
+		trace.SetError(err)
 		log.Println(err)
 		return lastBruteReindex
 	}
@@ -229,7 +342,7 @@ func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos c
 		dir := dir
 		g.Go(func() error {
 			ran := muIndexAndDataDirs.With(dir, func() {
-				if hasUpdate := fetchGitRepo(dir); !hasUpdate {
+				if hasUpdate := fetchGitRepo(ctx, dir); !hasUpdate {
 					mu.Lock()
 					later[dir] = struct{}{}
 					mu.Unlock()
@@ -263,7 +376,14 @@ func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos c
 
 // fetchGitRepo runs git-fetch, and returns true if there was an
 // update.
-func fetchGitRepo(dir string) bool {
+func fetchGitRepo(ctx context.Context, dir string) bool {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.gitFetchNeededRepos", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("dir", dir),
+	)
+
 	cmd := exec.Command("git", "--git-dir", dir, "fetch", "origin")
 	outBuf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
@@ -273,6 +393,7 @@ func fetchGitRepo(dir string) bool {
 	cmd.Stderr = errBuf
 	cmd.Stdout = outBuf
 	if err := cmd.Run(); err != nil {
+		trace.SetError(err)
 		log.Printf("command %s failed: %v\nOUT: %s\nERR: %s",
 			cmd.Args, err, outBuf.String(), errBuf.String())
 	} else {

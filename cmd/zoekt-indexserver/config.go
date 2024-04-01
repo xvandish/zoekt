@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,9 +28,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	openTracingLog "github.com/opentracing/opentracing-go/log"
+	internalTrace "github.com/xvandish/zoekt/trace"
 )
 
 type ConfigEntry struct {
@@ -73,18 +77,33 @@ func randomize(entries []ConfigEntry) []ConfigEntry {
 	return shuffled
 }
 
-func isHTTP(u string) bool {
+func isHTTP(ctx context.Context, u string) bool {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.isHTTP", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("url", u),
+	)
+
 	asURL, err := url.Parse(u)
 	return err == nil && (asURL.Scheme == "http" || asURL.Scheme == "https")
 }
 
-func readConfigURL(u string) ([]ConfigEntry, error) {
+func readConfigURL(ctx context.Context, u string) ([]ConfigEntry, error) {
 	var body []byte
 	var readErr error
 
-	if isHTTP(u) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.readConfigURL", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("url", u),
+	)
+
+	if isHTTP(ctx, u) {
 		rep, err := http.Get(u)
 		if err != nil {
+			trace.SetError(err)
 			return nil, err
 		}
 		defer rep.Body.Close()
@@ -105,13 +124,22 @@ func readConfigURL(u string) ([]ConfigEntry, error) {
 	return result, nil
 }
 
-func watchFile(path string) (<-chan struct{}, error) {
+func watchFile(ctx context.Context, path string) (<-chan struct{}, error) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.watchFile", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("path", path),
+	)
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
+		trace.SetError(err)
 		return nil, err
 	}
 
 	if err := watcher.Add(filepath.Dir(path)); err != nil {
+		trace.SetError(err)
 		return nil, err
 	}
 
@@ -136,28 +164,39 @@ func watchFile(path string) (<-chan struct{}, error) {
 	return out, nil
 }
 
-func periodicMirrorFile(repoDir string, opts *Options, pendingRepos chan<- string) {
+func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pendingRepos chan<- string) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicMirrorFile", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+	)
+
 	ticker := time.NewTicker(opts.mirrorInterval)
 
 	var watcher <-chan struct{}
-	if !isHTTP(opts.mirrorConfigFile) {
+	if !isHTTP(ctx, opts.mirrorConfigFile) {
 		var err error
-		watcher, err = watchFile(opts.mirrorConfigFile)
+
+		watcher, err = watchFile(ctx, opts.mirrorConfigFile)
 		if err != nil {
+			// add error message
+			trace.SetError(err)
 			log.Printf("watchFile(%q): %v", opts.mirrorConfigFile, err)
 		}
 	}
 
 	var lastCfg []ConfigEntry
 	for {
-		cfg, err := readConfigURL(opts.mirrorConfigFile)
+		cfg, err := readConfigURL(ctx, opts.mirrorConfigFile)
 		if err != nil {
+			trace.SetError(err)
 			log.Printf("readConfig(%s): %v", opts.mirrorConfigFile, err)
 		} else {
 			lastCfg = cfg
 		}
 
-		executeMirror(lastCfg, repoDir, opts.parallelListApiReqs, opts.parallelClones, pendingRepos)
+		executeMirror(ctx, lastCfg, repoDir, opts.parallelListApiReqs, opts.parallelClones, pendingRepos)
 
 		select {
 		case <-watcher:
@@ -167,7 +206,10 @@ func periodicMirrorFile(repoDir string, opts *Options, pendingRepos chan<- strin
 	}
 }
 
-func createGithubArgsMirrorAndFetchArgs(c ConfigEntry) []string {
+func createGithubArgsMirrorAndFetchArgs(ctx context.Context, c ConfigEntry) []string {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.createGithubArgsMirrorAndFetchArgs", "")
+	defer trace.Finish()
+
 	args := make([]string, 0)
 	if c.GitHubURL != "" {
 		args = append(args, "-url", c.GitHubURL)
@@ -186,9 +228,18 @@ func createGithubArgsMirrorAndFetchArgs(c ConfigEntry) []string {
 	if c.CredentialPath != "" {
 		args = append(args, "-token", c.CredentialPath)
 	}
+
+	trace.LogFields(
+		openTracingLog.String("topic", strings.Join(c.Topics, ",")),
+	)
+
 	for _, topic := range c.Topics {
 		args = append(args, "-topic", topic)
 	}
+	trace.LogFields(
+		openTracingLog.String("exclude_topic", strings.Join(c.ExcludeTopics, ",")),
+	)
+
 	for _, topic := range c.ExcludeTopics {
 		args = append(args, "-exclude_topic", topic)
 	}
@@ -199,7 +250,10 @@ func createGithubArgsMirrorAndFetchArgs(c ConfigEntry) []string {
 	return args
 }
 
-func executeMirror(cfg []ConfigEntry, repoDir string, parallelListApiReqs, parallelClones int, pendingRepos chan<- string) {
+func executeMirror(ctx context.Context, cfg []ConfigEntry, repoDir string, parallelListApiReqs, parallelClones int, pendingRepos chan<- string) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.executeMirror", "")
+	defer trace.Finish()
+
 	// Randomize the ordering in which we query
 	// things. This is to ensure that quota limits don't
 	// always hit the last one in the list.
@@ -209,7 +263,7 @@ func executeMirror(cfg []ConfigEntry, repoDir string, parallelListApiReqs, paral
 		if c.GitHubURL != "" || c.GithubUser != "" || c.GithubOrg != "" {
 			cmd = exec.Command("zoekt-mirror-github",
 				"-dest", repoDir, "-delete")
-			cmd.Args = append(cmd.Args, createGithubArgsMirrorAndFetchArgs(c)...)
+			cmd.Args = append(cmd.Args, createGithubArgsMirrorAndFetchArgs(ctx, c)...)
 			cmd.Args = append(cmd.Args, "--parallel_clone", strconv.Itoa(parallelClones))
 			cmd.Args = append(cmd.Args, "--max-concurrent-gh-requests", strconv.Itoa(parallelListApiReqs))
 		} else if c.GitilesURL != "" {
@@ -284,7 +338,7 @@ func executeMirror(cfg []ConfigEntry, repoDir string, parallelListApiReqs, paral
 			continue
 		}
 
-		stdout, stderr := loggedRun(cmd)
+		stdout, stderr := loggedRun(trace, cmd)
 
 		fmt.Printf("cmd %v - logs=%s\n", cmd.Args, string(stderr))
 		// stdout contains the repos. stderr contains every other log

@@ -33,7 +33,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
+	openTracingLog "github.com/opentracing/opentracing-go/log"
+	sglog "github.com/sourcegraph/log"
 	"github.com/xvandish/zoekt"
+	internalTracer "github.com/xvandish/zoekt/internal/tracer"
+	internalTrace "github.com/xvandish/zoekt/trace"
 )
 
 const day = time.Hour * 24
@@ -45,18 +50,24 @@ var (
 	// 2. prevent a repo from being indexed and fetched concurrently
 	// 3. stop all indexing/fetching while the periodic backup happens
 	muIndexAndDataDirs indexMutex
+
+	// globalTracer used by all functions.
+	globalTracer opentracing.Tracer
 )
 
-func loggedRun(cmd *exec.Cmd) (out, err []byte) {
+func loggedRun(tr *internalTrace.Trace, cmd *exec.Cmd) (out, err []byte) {
 	outBuf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
 	cmd.Stdout = outBuf
 	cmd.Stderr = errBuf
 
 	log.Printf("run %v", cmd.Args)
+	tr.LazyPrintf("%s", cmd.Args)
+
 	if err := cmd.Run(); err != nil {
-		log.Printf("command %s failed: %v\nOUT: %s\nERR: %s",
-			cmd.Args, err, outBuf.String(), errBuf.String())
+		tr.LazyPrintf("failed: %v", errBuf.String())
+		tr.LazyPrintf("output: %s", outBuf.String())
+		tr.SetError(err)
 	}
 
 	return outBuf.Bytes(), errBuf.Bytes()
@@ -141,7 +152,15 @@ func (o *Options) defineFlags() {
 	flag.StringVar(&o.workingHoursZoneStr, "working_hours_zone", "America/NYC", "A time.Location string to set work location")
 }
 
-func periodicBackup(dataDir, indexDir string, opts *Options) {
+func periodicBackup(ctx context.Context, dataDir, indexDir string, opts *Options) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicBackup", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("dataDir", dataDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
+
 	t := time.NewTicker(opts.backupInterval)
 	for {
 		// lock the index and git directories from being written to
@@ -150,12 +169,18 @@ func periodicBackup(dataDir, indexDir string, opts *Options) {
 			idxSyncCmd := exec.Command("rsync", "-ruv", indexDir+"/", "zoekt-backup/indices/")
 			err := idxSyncCmd.Run()
 			if err != nil {
+				trace.LogFields(
+					openTracingLog.String("err", err.Error()),
+				)
 				fmt.Printf("ERROR: error backup up index shards %v\n", err)
 			}
 
 			gitSyncCmd := exec.Command("rsync", "-ruv", dataDir+"/", "zoekt-backup/repos/")
 			err = gitSyncCmd.Run()
 			if err != nil {
+				trace.LogFields(
+					openTracingLog.String("err", err.Error()),
+				)
 				fmt.Printf("ERROR: error backing up git repos %v\n", err)
 			}
 			fmt.Printf("finished backup\n")
@@ -166,13 +191,21 @@ func periodicBackup(dataDir, indexDir string, opts *Options) {
 
 // indexPendingRepos consumes the directories on the repos channel and
 // indexes them, sequentially.
-func indexPendingRepos(indexDir, repoDir string, opts *Options, repos <-chan string) {
+func indexPendingRepos(ctx context.Context, indexDir, repoDir string, opts *Options, repos <-chan string) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.indexPendingRepos", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
+
 	// set up n listeners on the channel
 	for i := 0; i < opts.parallelIndexes; i++ {
 		go func(r <-chan string) {
 			for dir := range r {
 				ran := muIndexAndDataDirs.With(dir, func() {
-					indexPendingRepo(dir, indexDir, repoDir, opts)
+					indexPendingRepo(ctx, dir, indexDir, repoDir, opts)
 				})
 				if !ran {
 					fmt.Printf("index job for repository: %s already running\n", dir)
@@ -201,8 +234,11 @@ func indexPendingRepos(indexDir, repoDir string, opts *Options, repos <-chan str
 	}
 }
 
-func indexPendingRepo(dir, indexDir, repoDir string, opts *Options) {
-	ctx, cancel := context.WithTimeout(context.Background(), opts.indexTimeout)
+func indexPendingRepo(ctx context.Context, dir, indexDir, repoDir string, opts *Options) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.indexPendingRepo", "")
+	defer trace.Finish()
+
+	ctx, cancel := context.WithTimeout(ctx, opts.indexTimeout)
 	defer cancel()
 	args := []string{
 		"-require_ctags",
@@ -214,13 +250,22 @@ func indexPendingRepo(dir, indexDir, repoDir string, opts *Options) {
 	args = append(args, opts.indexFlags...)
 	args = append(args, dir)
 	cmd := exec.CommandContext(ctx, "zoekt-git-index", args...)
-	loggedRun(cmd)
+	loggedRun(trace, cmd)
 }
 
 // deleteLogs deletes old logs.
-func deleteLogs(logDir string, maxAge time.Duration) {
+func deleteLogs(ctx context.Context, logDir string, maxAge time.Duration) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteLogs", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("logDir", logDir),
+		openTracingLog.String("maxAge", maxAge.String()),
+	)
+
 	fs, err := filepath.Glob(filepath.Join(logDir, "*"))
 	if err != nil {
+		trace.SetError(err)
 		log.Fatalf("filepath.Glob(%s): %v", logDir, err)
 	}
 
@@ -232,30 +277,49 @@ func deleteLogs(logDir string, maxAge time.Duration) {
 	}
 }
 
-func deleteLogsLoop(logDir string, maxAge time.Duration) {
+func deleteLogsLoop(ctx context.Context, logDir string, maxAge time.Duration) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteLogsLoop", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("logDir", logDir),
+		openTracingLog.String("maxAge", maxAge.String()),
+	)
+
 	tick := time.NewTicker(maxAge / 100)
 	for {
-		deleteLogs(logDir, maxAge)
+		deleteLogs(ctx, logDir, maxAge)
 		<-tick.C
 	}
 }
 
 // Delete the shard if its corresponding git repo can't be found.
-func deleteIfOrphan(repoDir string, fn string) error {
+func deleteIfOrphan(ctx context.Context, repoDir string, fn string) error {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteIfOrphan", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("fn", fn),
+	)
+
 	f, err := os.Open(fn)
 	if err != nil {
+		trace.SetError(err)
 		return nil
 	}
 	defer f.Close()
 
 	ifile, err := zoekt.NewIndexFile(f)
 	if err != nil {
+		trace.SetError(err)
 		return nil
 	}
 	defer ifile.Close()
 
 	repos, _, err := zoekt.ReadMetadata(ifile)
 	if err != nil {
+		trace.SetError(err)
 		return nil
 	}
 
@@ -267,6 +331,7 @@ func deleteIfOrphan(repoDir string, fn string) error {
 
 	_, err = os.Stat(repo.Source)
 	if os.IsNotExist(err) {
+		trace.SetError(err)
 		log.Printf("deleting orphan shard %s; source %q not found", fn, repo.Source)
 		return os.Remove(fn)
 	}
@@ -274,18 +339,29 @@ func deleteIfOrphan(repoDir string, fn string) error {
 	return err
 }
 
-func deleteOrphanIndexes(indexDir, repoDir string, watchInterval time.Duration) {
+func deleteOrphanIndexes(ctx context.Context, indexDir, repoDir string, watchInterval time.Duration) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteOrphanIndexes", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("indexDir", indexDir),
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("watchInterval", watchInterval.String()),
+	)
+
 	t := time.NewTicker(watchInterval)
 
 	expr := indexDir + "/*"
 	for {
 		fs, err := filepath.Glob(expr)
 		if err != nil {
+			trace.SetError(err)
 			log.Printf("Glob(%q): %v", expr, err)
 		}
 
 		for _, f := range fs {
-			if err := deleteIfOrphan(repoDir, f); err != nil {
+			if err := deleteIfOrphan(ctx, repoDir, f); err != nil {
+				trace.SetError(err)
 				log.Printf("deleteIfOrphan(%q): %v", f, err)
 			}
 		}
@@ -294,6 +370,18 @@ func deleteOrphanIndexes(indexDir, repoDir string, watchInterval time.Duration) 
 }
 
 func main() {
+	ctx := context.Background()
+	resource := sglog.Resource{
+		Name:       "zoekt-indexserver",
+		Version:    zoekt.Version,
+		InstanceID: zoekt.HostnameBestEffort(),
+	}
+	internalTracer.Init(resource)
+
+	// start new tracer
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.main", "")
+	defer trace.Finish()
+
 	var opts Options
 	opts.defineFlags()
 	dataDir := flag.String("data_dir",
@@ -323,33 +411,42 @@ func main() {
 		}
 
 		if err := os.MkdirAll(s, 0o755); err != nil {
+			trace.LogFields(
+				openTracingLog.String("err", err.Error()),
+			)
 			log.Fatalf("MkdirAll %s: %v", s, err)
 		}
 	}
 
-	cfgs, err := readConfigURL(opts.mirrorConfigFile)
+	cfgs, err := readConfigURL(ctx, opts.mirrorConfigFile)
 	if err != nil {
+		trace.LogFields(
+			openTracingLog.String("err", err.Error()),
+		)
 		log.Fatalf("readConfigURL(%s): %v", opts.mirrorConfigFile, err)
 	}
 
 	if opts.useSmartGHFetch {
 		for _, cfg := range cfgs {
 			if !cfg.IsGithubConfig() {
+				trace.LogFields(
+					openTracingLog.String("err", "use_smart_gh_fetch is only valid if a config ONLY contains GitHub configs"),
+				)
 				log.Fatal("use_smart_gh_fetch is only valid if a config ONLY contains GitHub configs")
 			}
 		}
 	}
 
 	pendingRepos := make(chan string, 6000)
-	go periodicMirrorFile(repoDir, &opts, pendingRepos)
-	go deleteLogsLoop(logDir, opts.maxLogAge)
-	go deleteOrphanIndexes(*indexDir, repoDir, opts.fetchInterval)
-	go periodicBackup(repoDir, *indexDir, &opts)
-	go indexPendingRepos(*indexDir, repoDir, &opts, pendingRepos)
+	go periodicMirrorFile(ctx, repoDir, &opts, pendingRepos)
+	go deleteLogsLoop(ctx, logDir, opts.maxLogAge)
+	go deleteOrphanIndexes(ctx, *indexDir, repoDir, opts.fetchInterval)
+	go periodicBackup(ctx, repoDir, *indexDir, &opts)
+	go indexPendingRepos(ctx, *indexDir, repoDir, &opts, pendingRepos)
 
 	if opts.useSmartGHFetch {
-		periodicSmartGHFetchV2(repoDir, *indexDir, &opts, pendingRepos)
+		periodicSmartGHFetchV2(ctx, repoDir, *indexDir, &opts, pendingRepos)
 	} else {
-		periodicFetch(repoDir, *indexDir, &opts, pendingRepos)
+		periodicFetch(ctx, repoDir, *indexDir, &opts, pendingRepos)
 	}
 }
