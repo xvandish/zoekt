@@ -33,15 +33,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
+	openTracingLog "github.com/opentracing/opentracing-go/log"
+	sglog "github.com/sourcegraph/log"
 	"github.com/xvandish/zoekt"
 	internalTracer "github.com/xvandish/zoekt/internal/tracer"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
-
-	sglog "github.com/sourcegraph/log"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	sdkTrace "go.opentelemetry.io/otel/sdk/trace"
+	internalTrace "github.com/xvandish/zoekt/trace"
 )
 
 const day = time.Hour * 24
@@ -53,44 +50,24 @@ var (
 	// 2. prevent a repo from being indexed and fetched concurrently
 	// 3. stop all indexing/fetching while the periodic backup happens
 	muIndexAndDataDirs indexMutex
+
+	// globalTracer used by all functions.
+	globalTracer opentracing.Tracer
 )
 
-var tracer trace.Tracer
-
-func init() {
-	resource := sglog.Resource{
-		Name:       "zoekt-indexserver",
-		Version:    zoekt.Version,
-		InstanceID: zoekt.HostnameBestEffort(),
-	}
-	internalTracer.Init(resource)
-	tracer = otel.Tracer("cmd/zoekt-indexserver")
-}
-
-func loggedRun(ctx context.Context, cmd *exec.Cmd) (out, err []byte) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("cmd", cmd.String()),
-	}
-
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"loggedRun",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
-
+func loggedRun(tr *internalTrace.Trace, cmd *exec.Cmd) (out, err []byte) {
 	outBuf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
 	cmd.Stdout = outBuf
 	cmd.Stderr = errBuf
 
 	log.Printf("run %v", cmd.Args)
+	tr.LazyPrintf("%s", cmd.Args)
+
 	if err := cmd.Run(); err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
-		log.Printf("command %s failed: %v\nOUT: %s\nERR: %s",
-			cmd.Args, err, outBuf.String(), errBuf.String())
+		tr.LazyPrintf("failed: %v", errBuf.String())
+		tr.LazyPrintf("output: %s", outBuf.String())
+		tr.SetError(err)
 	}
 
 	return outBuf.Bytes(), errBuf.Bytes()
@@ -176,19 +153,13 @@ func (o *Options) defineFlags() {
 }
 
 func periodicBackup(ctx context.Context, dataDir, indexDir string, opts *Options) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("dataDir", dataDir),
-		attribute.String("indexDir", indexDir),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicBackup", "")
+	defer trace.Finish()
 
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"periodicBackup",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("dataDir", dataDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
 
 	t := time.NewTicker(opts.backupInterval)
 	for {
@@ -198,14 +169,18 @@ func periodicBackup(ctx context.Context, dataDir, indexDir string, opts *Options
 			idxSyncCmd := exec.Command("rsync", "-ruv", indexDir+"/", "zoekt-backup/indices/")
 			err := idxSyncCmd.Run()
 			if err != nil {
-				span.SetAttributes(attribute.Key("err").String(err.Error()))
+				trace.LogFields(
+					openTracingLog.String("err", err.Error()),
+				)
 				fmt.Printf("ERROR: error backup up index shards %v\n", err)
 			}
 
 			gitSyncCmd := exec.Command("rsync", "-ruv", dataDir+"/", "zoekt-backup/repos/")
 			err = gitSyncCmd.Run()
 			if err != nil {
-				span.SetAttributes(attribute.Key("err").String(err.Error()))
+				trace.LogFields(
+					openTracingLog.String("err", err.Error()),
+				)
 				fmt.Printf("ERROR: error backing up git repos %v\n", err)
 			}
 			fmt.Printf("finished backup\n")
@@ -217,19 +192,13 @@ func periodicBackup(ctx context.Context, dataDir, indexDir string, opts *Options
 // indexPendingRepos consumes the directories on the repos channel and
 // indexes them, sequentially.
 func indexPendingRepos(ctx context.Context, indexDir, repoDir string, opts *Options, repos <-chan string) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-		attribute.String("indexDir", indexDir),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.indexPendingRepos", "")
+	defer trace.Finish()
 
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"indexPendingRepos",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
 
 	// set up n listeners on the channel
 	for i := 0; i < opts.parallelIndexes; i++ {
@@ -266,20 +235,8 @@ func indexPendingRepos(ctx context.Context, indexDir, repoDir string, opts *Opti
 }
 
 func indexPendingRepo(ctx context.Context, dir, indexDir, repoDir string, opts *Options) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("dir", dir),
-		attribute.String("repoDir", repoDir),
-		attribute.String("indexDir", indexDir),
-	}
-
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"indexPendingRepo",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.indexPendingRepo", "")
+	defer trace.Finish()
 
 	ctx, cancel := context.WithTimeout(ctx, opts.indexTimeout)
 	defer cancel()
@@ -293,28 +250,22 @@ func indexPendingRepo(ctx context.Context, dir, indexDir, repoDir string, opts *
 	args = append(args, opts.indexFlags...)
 	args = append(args, dir)
 	cmd := exec.CommandContext(ctx, "zoekt-git-index", args...)
-	loggedRun(ctx, cmd)
+	loggedRun(trace, cmd)
 }
 
 // deleteLogs deletes old logs.
 func deleteLogs(ctx context.Context, logDir string, maxAge time.Duration) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("logDir", logDir),
-		attribute.String("maxAge", maxAge.String()),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteLogs", "")
+	defer trace.Finish()
 
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"deleteLogs",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("logDir", logDir),
+		openTracingLog.String("maxAge", maxAge.String()),
+	)
 
 	fs, err := filepath.Glob(filepath.Join(logDir, "*"))
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		log.Fatalf("filepath.Glob(%s): %v", logDir, err)
 	}
 
@@ -327,19 +278,13 @@ func deleteLogs(ctx context.Context, logDir string, maxAge time.Duration) {
 }
 
 func deleteLogsLoop(ctx context.Context, logDir string, maxAge time.Duration) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("logDir", logDir),
-		attribute.String("maxAge", maxAge.String()),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteLogsLoop", "")
+	defer trace.Finish()
 
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"deleteLogsLoop",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("logDir", logDir),
+		openTracingLog.String("maxAge", maxAge.String()),
+	)
 
 	tick := time.NewTicker(maxAge / 100)
 	for {
@@ -350,37 +295,31 @@ func deleteLogsLoop(ctx context.Context, logDir string, maxAge time.Duration) {
 
 // Delete the shard if its corresponding git repo can't be found.
 func deleteIfOrphan(ctx context.Context, repoDir string, fn string) error {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-		attribute.String("fn", fn),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteIfOrphan", "")
+	defer trace.Finish()
 
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"deleteIfOrphan",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("fn", fn),
+	)
 
 	f, err := os.Open(fn)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		return nil
 	}
 	defer f.Close()
 
 	ifile, err := zoekt.NewIndexFile(f)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		return nil
 	}
 	defer ifile.Close()
 
 	repos, _, err := zoekt.ReadMetadata(ifile)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		return nil
 	}
 
@@ -392,7 +331,7 @@ func deleteIfOrphan(ctx context.Context, repoDir string, fn string) error {
 
 	_, err = os.Stat(repo.Source)
 	if os.IsNotExist(err) {
-		span.SetAttributes(attribute.Key("err").String(fmt.Sprintf("deleting orphan shard %s; source %q not found Error: %s", fn, repo.Source, err.Error())))
+		trace.SetError(err)
 		log.Printf("deleting orphan shard %s; source %q not found", fn, repo.Source)
 		return os.Remove(fn)
 	}
@@ -401,38 +340,28 @@ func deleteIfOrphan(ctx context.Context, repoDir string, fn string) error {
 }
 
 func deleteOrphanIndexes(ctx context.Context, indexDir, repoDir string, watchInterval time.Duration) {
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.deleteOrphanIndexes", "")
+	defer trace.Finish()
+
+	trace.LogFields(
+		openTracingLog.String("indexDir", indexDir),
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("watchInterval", watchInterval.String()),
+	)
+
 	t := time.NewTicker(watchInterval)
 
 	expr := indexDir + "/*"
 	for {
-		commonAttrs := []attribute.KeyValue{
-			attribute.String("repoDir", repoDir),
-			attribute.String("indexDir", indexDir),
-			attribute.String("watchInterval", watchInterval.String()),
-		}
-
-		// work begins
-		ctx, span := tracer.Start(
-			ctx,
-			"deleteOrphanIndexes",
-			trace.WithAttributes(commonAttrs...))
-
-		// end span once done with func
-		defer span.End()
-
-		span.SetAttributes(attribute.Key("expr").String(expr))
 		fs, err := filepath.Glob(expr)
 		if err != nil {
-			span.SetAttributes(attribute.Key("err").String(err.Error()))
+			trace.SetError(err)
 			log.Printf("Glob(%q): %v", expr, err)
 		}
 
-		span.SetAttributes(attribute.Key("files").StringSlice(fs))
-
 		for _, f := range fs {
-			span.SetAttributes(attribute.Key("file").String(f))
 			if err := deleteIfOrphan(ctx, repoDir, f); err != nil {
-				span.SetAttributes(attribute.Key("err").String(err.Error()))
+				trace.SetError(err)
 				log.Printf("deleteIfOrphan(%q): %v", f, err)
 			}
 		}
@@ -442,24 +371,16 @@ func deleteOrphanIndexes(ctx context.Context, indexDir, repoDir string, watchInt
 
 func main() {
 	ctx := context.Background()
-
-	exp, err := otlptracegrpc.New(ctx)
-	if err != nil {
-		panic(err)
+	resource := sglog.Resource{
+		Name:       "zoekt-indexserver",
+		Version:    zoekt.Version,
+		InstanceID: zoekt.HostnameBestEffort(),
 	}
+	internalTracer.Init(resource)
 
-	tracerProvider := sdkTrace.NewTracerProvider(sdkTrace.WithBatcher(exp))
-	defer func() {
-		if err := tracerProvider.Shutdown(ctx); err != nil {
-			panic(err)
-		}
-	}()
-	otel.SetTracerProvider(tracerProvider)
-
-	// work begins
-	ctx, span := tracer.Start(ctx, "main")
-	// end span once done with func
-	defer span.End()
+	// start new tracer
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.main", "")
+	defer trace.Finish()
 
 	var opts Options
 	opts.defineFlags()
@@ -490,21 +411,27 @@ func main() {
 		}
 
 		if err := os.MkdirAll(s, 0o755); err != nil {
-			span.SetAttributes(attribute.Key("err").String(err.Error()))
+			trace.LogFields(
+				openTracingLog.String("err", err.Error()),
+			)
 			log.Fatalf("MkdirAll %s: %v", s, err)
 		}
 	}
 
 	cfgs, err := readConfigURL(ctx, opts.mirrorConfigFile)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.LogFields(
+			openTracingLog.String("err", err.Error()),
+		)
 		log.Fatalf("readConfigURL(%s): %v", opts.mirrorConfigFile, err)
 	}
 
 	if opts.useSmartGHFetch {
 		for _, cfg := range cfgs {
 			if !cfg.IsGithubConfig() {
-				span.SetAttributes(attribute.Key("err").String("use_smart_gh_fetch is only valid if a config ONLY contains GitHub configs"))
+				trace.LogFields(
+					openTracingLog.String("err", "use_smart_gh_fetch is only valid if a config ONLY contains GitHub configs"),
+				)
 				log.Fatal("use_smart_gh_fetch is only valid if a config ONLY contains GitHub configs")
 			}
 		}

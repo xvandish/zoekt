@@ -12,27 +12,22 @@ import (
 	"sync"
 	"time"
 
+	openTracingLog "github.com/opentracing/opentracing-go/log"
 	"github.com/xvandish/zoekt/gitindex"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
+	internalTrace "github.com/xvandish/zoekt/trace"
 	"golang.org/x/sync/errgroup"
 )
 
 // finds all git repos available, and calls git fetch on them
 // it does so in parallel, with opts.parallelFetches as the bound
 func periodicFetch(ctx context.Context, repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-		attribute.String("indexDir", indexDir),
-	}
-	// create new span
-	ctx, span := tracer.Start(
-		ctx,
-		"periodicFetch",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicFetch", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
 
 	t := time.NewTicker(opts.fetchInterval)
 	lastBruteReindex := time.Now()
@@ -44,18 +39,8 @@ func periodicFetch(ctx context.Context, repoDir, indexDir string, opts *Options,
 }
 
 func callGetReposModifiedSinceForCfgs(ctx context.Context, cfgs []ConfigEntry, lookbackInterval time.Time, repoDir string) []string {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-		attribute.String("lookbackInterval", lookbackInterval.String()),
-	}
-	// create new span
-	ctx, span := tracer.Start(
-		ctx,
-		"callGetReposModifiedSinceForCfgs",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.callGetReposModifiedSinceForCfgs", "")
+	defer trace.Finish()
 
 	var reposToFetchAndIndex []string
 	for _, c := range cfgs {
@@ -65,7 +50,7 @@ func callGetReposModifiedSinceForCfgs(ctx context.Context, cfgs []ConfigEntry, l
 		cmd.Args = append(cmd.Args, createGithubArgsMirrorAndFetchArgs(ctx, c)...)
 		cmd.Args = append(cmd.Args, "-since", lookbackInterval.Format(iso8601Format))
 
-		stdout, _ := loggedRun(ctx, cmd)
+		stdout, _ := loggedRun(trace, cmd)
 		reposPushed := 0
 		for _, fn := range bytes.Split(stdout, []byte{'\n'}) {
 			if len(fn) == 0 {
@@ -78,25 +63,22 @@ func callGetReposModifiedSinceForCfgs(ctx context.Context, cfgs []ConfigEntry, l
 		fmt.Printf("%v - there are %d repos to fetch and index\n", cmd.Args, reposPushed)
 	}
 
-	// add list of repos to span
-	span.SetAttributes(attribute.StringSlice("reposToFetchAndIndex", reposToFetchAndIndex))
+	// add list of repos to trace
+	trace.LogFields(
+		openTracingLog.String("reposToFetchAndIndex", strings.Join(reposToFetchAndIndex, ",")),
+	)
 
 	return reposToFetchAndIndex
 }
 
 func processReposToFetchAndIndex(ctx context.Context, reposToFetchAndIndex []string, parallelFetches int, pendingRepos chan<- string) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.StringSlice("reposToFetchAndIndex", reposToFetchAndIndex),
-		attribute.Int("parallelFetches", parallelFetches),
-	}
-	// create new span
-	ctx, span := tracer.Start(
-		ctx,
-		"processReposToFetchAndIndex",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.processReposToFetchAndIndex", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("reposToFetchAndIndex", strings.Join(reposToFetchAndIndex, ",")),
+		openTracingLog.Int("parallelFetches", parallelFetches),
+	)
 
 	g, _ := errgroup.WithContext(context.Background())
 	g.SetLimit(parallelFetches)
@@ -128,58 +110,60 @@ func processReposToFetchAndIndex(ctx context.Context, reposToFetchAndIndex []str
 // then we use it
 
 func writeFetchTimeToFile(ctx context.Context, repoDir string, t time.Time) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-		attribute.String("time", t.String()),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"writeFetchTimeToFile",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.writeFetchTimeToFile", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("time", t.String()),
+	)
 
 	f := filepath.Join(repoDir, "time-of-last-update.txt")
 
-	span.SetAttributes(attribute.String("file-path", f))
+	trace.LogFields(
+		openTracingLog.String("file-path", f),
+	)
+
 	err := os.WriteFile(f, []byte(t.Format(iso8601Format)), 0644)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		fmt.Printf("error writing time to file: %v\n", err)
 	}
 }
 
 func readFetchTimeFromFile(ctx context.Context, repoDir string) (time.Time, error) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"readFetchTimeFromFile",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.readFetchTimeFromFile", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+	)
 
 	f := filepath.Join(repoDir, "time-of-last-update.txt")
-	span.SetAttributes(attribute.String("file-path", f))
+	trace.LogFields(
+		openTracingLog.String("file-path", f),
+	)
+
 	bytes, err := os.ReadFile(f)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		fmt.Printf("error reading fetchTime from file: %v\n", err)
 		return time.Time{}, err
 	}
+
 	lastLookbackIntervalStart := strings.TrimSpace(string(bytes))
+
 	p, err := time.Parse(iso8601Format, lastLookbackIntervalStart)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		fmt.Printf("error reading fetchTime from file: %v\n", err)
 		return time.Time{}, err
 	}
-	span.SetAttributes(attribute.Key("time").String(p.String()))
+
+	trace.LogFields(
+		openTracingLog.String("time", p.String()),
+	)
+
 	return p, nil
 }
 
@@ -192,33 +176,32 @@ const dayAgo = 24 * time.Hour
 // we also return a newer timeToWrite that will be written to the file. This prevents an
 // endless loop, which I will explain later...
 func getLookbackWindowStart(ctx context.Context, repoDir string, fetchInterval time.Duration) (time.Time, time.Time) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-		attribute.String("fetchInterval", fetchInterval.String()),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"getLookbackWindowStart",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.getLookbackWindowStart", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("fetchInterval", fetchInterval.String()),
+	)
 
 	now := time.Now()
 	lookbackIntervalStart := now.Add(-fetchInterval)
-	span.SetAttributes(attribute.Key("lookbackIntervalStart").String(lookbackIntervalStart.String()))
+	trace.LogFields(
+		openTracingLog.String("lookbackIntervalStart", lookbackIntervalStart.String()),
+	)
 
 	// if there is an error reading the previousLookbackInterval
 	prevLookbackIntervalStart, err := readFetchTimeFromFile(ctx, repoDir)
 	if err != nil { // no file exists, or format wrong
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		fmt.Printf("using a 24 hour lookback window.\n")
 		return now, lookbackIntervalStart.Add(time.Duration(-24) * time.Hour)
 	}
 
 	diff := lookbackIntervalStart.Sub(prevLookbackIntervalStart)
-	span.SetAttributes(attribute.Key("diff").String(diff.String()))
+	trace.LogFields(
+		openTracingLog.String("diff", diff.String()),
+	)
 
 	// this should never happen. If it does, we have a problem, most likely in the
 	// file writing phase
@@ -238,52 +221,41 @@ func getLookbackWindowStart(ctx context.Context, repoDir string, fetchInterval t
 }
 
 func isDuringWorkHours(ctx context.Context, timeToCheck time.Time, startHour, endHour int, zone *time.Location) bool {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("timeToCheck", timeToCheck.String()),
-		attribute.Int("startHour", startHour),
-		attribute.Int("endHour", endHour),
-		attribute.String("zone", zone.String()),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"isDuringWorkHours",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.isDuringWorkHours", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("timeToCheck", timeToCheck.String()),
+		openTracingLog.Int("startHour", startHour),
+		openTracingLog.Int("endHour", endHour),
+		openTracingLog.String("zone", zone.String()),
+	)
+
 	currHour := timeToCheck.In(zone).Hour()
-	span.SetAttributes(attribute.Key("currHour").Int(currHour))
+	trace.LogFields(
+		openTracingLog.Int("currHour", currHour),
+	)
+
 	return currHour >= startHour && currHour <= endHour
 }
 func workingHoursEnabled(ctx context.Context, opts *Options) bool {
-	commonAttrs := []attribute.KeyValue{
-		attribute.Int("workingHoursStart", opts.workingHoursStart),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"workingHoursEnabled",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.workingHoursEnabled", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.Int("workingHoursStart", opts.workingHoursStart),
+	)
 
 	return opts.workingHoursStart >= 0
 }
 
 func periodicSmartGHFetchV2(ctx context.Context, repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"periodicSmartGHFetchV2",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicSmartGHFetchV2", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+	)
 
 	currInterval := opts.fetchInterval
 	if workingHoursEnabled(ctx, opts) && !isDuringWorkHours(ctx, time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
@@ -307,7 +279,7 @@ func periodicSmartGHFetchV2(ctx context.Context, repoDir, indexDir string, opts 
 		cfg, err := readConfigURL(ctx, opts.mirrorConfigFile)
 		if err != nil {
 			// we'd have a lot of problems anyways, so just error out
-			span.SetAttributes(attribute.Key("err").String(err.Error()))
+			trace.SetError(err)
 			fmt.Printf("ERROR: can't read configUrl: %v\n", err)
 			continue
 		}
@@ -338,23 +310,18 @@ func periodicSmartGHFetchV2(ctx context.Context, repoDir, indexDir string, opts 
 }
 
 func gitFetchNeededRepos(ctx context.Context, repoDir, indexDir string, opts *Options, pendingRepos chan<- string, lastBruteReindex time.Time) time.Time {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repoDir", repoDir),
-		attribute.String("indexDir", indexDir),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"gitFetchNeededRepos",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.gitFetchNeededRepos", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+		openTracingLog.String("indexDir", indexDir),
+	)
 
 	fmt.Printf("running gitFetchNeededRepos\n")
 	repos, err := gitindex.FindGitRepos(repoDir)
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		log.Println(err)
 		return lastBruteReindex
 	}
@@ -410,17 +377,12 @@ func gitFetchNeededRepos(ctx context.Context, repoDir, indexDir string, opts *Op
 // fetchGitRepo runs git-fetch, and returns true if there was an
 // update.
 func fetchGitRepo(ctx context.Context, dir string) bool {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("dir", dir),
-	}
-	// create new span
-	_, span := tracer.Start(
-		ctx,
-		"fetchGitRepo",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.gitFetchNeededRepos", "")
+	defer trace.Finish()
 
-	// end span once done with func
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("dir", dir),
+	)
 
 	cmd := exec.Command("git", "--git-dir", dir, "fetch", "origin")
 	outBuf := &bytes.Buffer{}
@@ -431,7 +393,7 @@ func fetchGitRepo(ctx context.Context, dir string) bool {
 	cmd.Stderr = errBuf
 	cmd.Stdout = outBuf
 	if err := cmd.Run(); err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		log.Printf("command %s failed: %v\nOUT: %s\nERR: %s",
 			cmd.Args, err, outBuf.String(), errBuf.String())
 	} else {

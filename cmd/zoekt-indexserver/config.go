@@ -28,11 +28,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
+	openTracingLog "github.com/opentracing/opentracing-go/log"
+	internalTrace "github.com/xvandish/zoekt/trace"
 )
 
 type ConfigEntry struct {
@@ -77,16 +78,12 @@ func randomize(entries []ConfigEntry) []ConfigEntry {
 }
 
 func isHTTP(ctx context.Context, u string) bool {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("url", u),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.isHTTP", "")
+	defer trace.Finish()
 
-	ctx, span := tracer.Start(
-		ctx,
-		"isHTTP",
-		trace.WithAttributes(commonAttrs...))
-
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("url", u),
+	)
 
 	asURL, err := url.Parse(u)
 	return err == nil && (asURL.Scheme == "http" || asURL.Scheme == "https")
@@ -95,21 +92,18 @@ func isHTTP(ctx context.Context, u string) bool {
 func readConfigURL(ctx context.Context, u string) ([]ConfigEntry, error) {
 	var body []byte
 	var readErr error
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("url", u),
-	}
 
-	ctx, span := tracer.Start(
-		ctx,
-		"readConfigURL",
-		trace.WithAttributes(commonAttrs...))
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.readConfigURL", "")
+	defer trace.Finish()
 
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("url", u),
+	)
 
 	if isHTTP(ctx, u) {
 		rep, err := http.Get(u)
 		if err != nil {
-			span.SetAttributes(attribute.Key("err").String(err.Error()))
+			trace.SetError(err)
 			return nil, err
 		}
 		defer rep.Body.Close()
@@ -131,25 +125,21 @@ func readConfigURL(ctx context.Context, u string) ([]ConfigEntry, error) {
 }
 
 func watchFile(ctx context.Context, path string) (<-chan struct{}, error) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("path", path),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.watchFile", "")
+	defer trace.Finish()
 
-	ctx, span := tracer.Start(
-		ctx,
-		"watchFile",
-		trace.WithAttributes(commonAttrs...))
-
-	defer span.End()
+	trace.LogFields(
+		openTracingLog.String("path", path),
+	)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		return nil, err
 	}
 
 	if err := watcher.Add(filepath.Dir(path)); err != nil {
-		span.SetAttributes(attribute.Key("err").String(err.Error()))
+		trace.SetError(err)
 		return nil, err
 	}
 
@@ -175,18 +165,13 @@ func watchFile(ctx context.Context, path string) (<-chan struct{}, error) {
 }
 
 func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pendingRepos chan<- string) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repo-dir", repoDir),
-	}
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.periodicMirrorFile", "")
+	defer trace.Finish()
 
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"periodicMirrorFile",
-		trace.WithAttributes(commonAttrs...))
+	trace.LogFields(
+		openTracingLog.String("repoDir", repoDir),
+	)
 
-	// end span once done with func
-	defer span.End()
 	ticker := time.NewTicker(opts.mirrorInterval)
 
 	var watcher <-chan struct{}
@@ -196,7 +181,7 @@ func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pend
 		watcher, err = watchFile(ctx, opts.mirrorConfigFile)
 		if err != nil {
 			// add error message
-			span.SetAttributes(attribute.Key("err").String(err.Error()))
+			trace.SetError(err)
 			log.Printf("watchFile(%q): %v", opts.mirrorConfigFile, err)
 		}
 	}
@@ -205,7 +190,7 @@ func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pend
 	for {
 		cfg, err := readConfigURL(ctx, opts.mirrorConfigFile)
 		if err != nil {
-			span.SetAttributes(attribute.Key("err").String(err.Error()))
+			trace.SetError(err)
 			log.Printf("readConfig(%s): %v", opts.mirrorConfigFile, err)
 		} else {
 			lastCfg = cfg
@@ -222,68 +207,52 @@ func periodicMirrorFile(ctx context.Context, repoDir string, opts *Options, pend
 }
 
 func createGithubArgsMirrorAndFetchArgs(ctx context.Context, c ConfigEntry) []string {
-	// work begins
-	ctx, span := tracer.Start(ctx, "createGithubArgsMirrorAndFetchArgs")
-
-	// end span once done with func
-	defer span.End()
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.createGithubArgsMirrorAndFetchArgs", "")
+	defer trace.Finish()
 
 	args := make([]string, 0)
 	if c.GitHubURL != "" {
 		args = append(args, "-url", c.GitHubURL)
-		span.SetAttributes(attribute.Key("url").String(c.GitHubURL))
 	}
 	if c.GithubUser != "" {
 		args = append(args, "-user", c.GithubUser)
-		span.SetAttributes(attribute.Key("user").String(c.GithubUser))
 	} else if c.GithubOrg != "" {
 		args = append(args, "-org", c.GithubOrg)
-		span.SetAttributes(attribute.Key("org").String(c.GithubOrg))
 	}
 	if c.Name != "" {
 		args = append(args, "-name", c.Name)
-		span.SetAttributes(attribute.Key("name").String(c.Name))
 	}
 	if c.Exclude != "" {
 		args = append(args, "-exclude", c.Exclude)
-		span.SetAttributes(attribute.Key("exclude").String(c.Exclude))
 	}
 	if c.CredentialPath != "" {
 		args = append(args, "-token", c.CredentialPath)
-		span.SetAttributes(attribute.Key("token-path").String(c.CredentialPath))
 	}
-	span.SetAttributes(attribute.Key("topic").StringSlice(c.Topics))
+
+	trace.LogFields(
+		openTracingLog.String("topic", strings.Join(c.Topics, ",")),
+	)
+
 	for _, topic := range c.Topics {
 		args = append(args, "-topic", topic)
-
 	}
-	span.SetAttributes(attribute.Key("exclude_topic").StringSlice(c.ExcludeTopics))
+	trace.LogFields(
+		openTracingLog.String("exclude_topic", strings.Join(c.ExcludeTopics, ",")),
+	)
+
 	for _, topic := range c.ExcludeTopics {
 		args = append(args, "-exclude_topic", topic)
 	}
 	if c.NoArchived {
 		args = append(args, "-no_archived")
-		span.SetAttributes(attribute.Key("no_archived").Bool(c.NoArchived))
 	}
 
 	return args
 }
 
 func executeMirror(ctx context.Context, cfg []ConfigEntry, repoDir string, parallelListApiReqs, parallelClones int, pendingRepos chan<- string) {
-	commonAttrs := []attribute.KeyValue{
-		attribute.String("repo-dir", repoDir),
-		attribute.Int("parallelListApiReqs", parallelListApiReqs),
-		attribute.Int("parallelClones", parallelClones),
-	}
-
-	// work begins
-	ctx, span := tracer.Start(
-		ctx,
-		"executeMirror",
-		trace.WithAttributes(commonAttrs...))
-
-	// end span once done with func
-	defer span.End()
+	trace, ctx := internalTrace.New(ctx, "zoekt-indexserver.executeMirror", "")
+	defer trace.Finish()
 
 	// Randomize the ordering in which we query
 	// things. This is to ensure that quota limits don't
@@ -369,7 +338,7 @@ func executeMirror(ctx context.Context, cfg []ConfigEntry, repoDir string, paral
 			continue
 		}
 
-		stdout, stderr := loggedRun(ctx, cmd)
+		stdout, stderr := loggedRun(trace, cmd)
 
 		fmt.Printf("cmd %v - logs=%s\n", cmd.Args, string(stderr))
 		// stdout contains the repos. stderr contains every other log
