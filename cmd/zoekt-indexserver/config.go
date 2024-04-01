@@ -213,40 +213,20 @@ func createGithubArgsMirrorAndFetchArgs(ctx context.Context, c ConfigEntry) []st
 	args := make([]string, 0)
 	if c.GitHubURL != "" {
 		args = append(args, "-url", c.GitHubURL)
-		trace.LogFields(
-			openTracingLog.String("url", c.GitHubURL),
-		)
 	}
 	if c.GithubUser != "" {
 		args = append(args, "-user", c.GithubUser)
-		trace.LogFields(
-			openTracingLog.String("user", c.GithubUser),
-		)
 	} else if c.GithubOrg != "" {
 		args = append(args, "-org", c.GithubOrg)
-		trace.LogFields(
-			openTracingLog.String("org", c.GithubOrg),
-		)
-
 	}
 	if c.Name != "" {
 		args = append(args, "-name", c.Name)
-		trace.LogFields(
-			openTracingLog.String("name", c.Name),
-		)
-
 	}
 	if c.Exclude != "" {
 		args = append(args, "-exclude", c.Exclude)
-		trace.LogFields(
-			openTracingLog.String("exclude", c.Exclude),
-		)
 	}
 	if c.CredentialPath != "" {
 		args = append(args, "-token", c.CredentialPath)
-		trace.LogFields(
-			openTracingLog.String("token", c.CredentialPath),
-		)
 	}
 
 	trace.LogFields(
@@ -265,9 +245,6 @@ func createGithubArgsMirrorAndFetchArgs(ctx context.Context, c ConfigEntry) []st
 	}
 	if c.NoArchived {
 		args = append(args, "-no_archived")
-		trace.LogFields(
-			openTracingLog.Bool("no_archived", c.NoArchived),
-		)
 	}
 
 	return args
