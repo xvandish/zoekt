@@ -56,7 +56,7 @@ func TestIndexEmptyRepo(t *testing.T) {
 		},
 	}
 
-	if err := IndexGitRepo(opts); err != nil {
+	if _, err := IndexGitRepo(opts); err != nil {
 		t.Fatalf("IndexGitRepo: %v", err)
 	}
 }
@@ -619,7 +619,7 @@ func TestIndexDeltaBasic(t *testing.T) {
 					}
 
 					// run test
-					err := indexGitRepo(options, gitIndexConfig{
+					_, err := indexGitRepo(options, gitIndexConfig{
 						prepareDeltaBuild:  prepareDeltaSpy,
 						prepareNormalBuild: prepareNormalSpy,
 					})
@@ -753,6 +753,8 @@ func TestRepoPathRanks(t *testing.T) {
 }
 
 func runScript(t *testing.T, cwd string, script string) {
+	t.Helper()
+
 	err := os.MkdirAll(cwd, 0o755)
 	if err != nil {
 		t.Fatalf("ensuring path %q exists: %s", cwd, err)
@@ -760,8 +762,25 @@ func runScript(t *testing.T, cwd string, script string) {
 
 	cmd := exec.Command("sh", "-euxc", script)
 	cmd.Dir = cwd
+	cmd.Env = append([]string{"GIT_CONFIG_GLOBAL=", "GIT_CONFIG_SYSTEM="}, os.Environ()...)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("execution error: %v, output %s", err, out)
+	}
+}
+
+func TestSetTemplate(t *testing.T) {
+	repositoryDir := t.TempDir()
+
+	// setup: initialize the repository and all of its branches
+	runScript(t, repositoryDir, "git init -b master")
+	runScript(t, repositoryDir, "git config remote.origin.url git@github.com:sourcegraph/zoekt.git")
+	desc := zoekt.Repository{}
+	if err := setTemplatesFromConfig(&desc, repositoryDir); err != nil {
+		t.Fatalf("setTemplatesFromConfig: %v", err)
+	}
+
+	if got, want := desc.FileURLTemplate, "https://github.com/sourcegraph/zoekt/blob/{{.Version}}/{{.Path}}"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

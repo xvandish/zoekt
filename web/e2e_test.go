@@ -30,11 +30,9 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/query"
-
-	"github.com/xvandish/zoekt/rpc"
-	"github.com/xvandish/zoekt/stream"
 )
 
 // TODO(hanwen): cut & paste from ../ . Should create internal test
@@ -393,7 +391,7 @@ func TestContextLines(t *testing.T) {
 							{
 								Pre:   "f",
 								Match: "our",
-								Post:  "th",
+								Post:  "th\n",
 							},
 						},
 					},
@@ -431,11 +429,11 @@ func TestContextLines(t *testing.T) {
 							{
 								Pre:   "f",
 								Match: "our",
-								Post:  "th",
+								Post:  "th\n",
 							},
 						},
-						Before: "second snippet\nthird thing",
-						After:  "fifth block\nsixth example",
+						Before: "second snippet\nthird thing\n",
+						After:  "fifth block\nsixth example\n",
 					},
 				},
 			},
@@ -453,10 +451,10 @@ func TestContextLines(t *testing.T) {
 							{
 								Pre:   "",
 								Match: "one",
-								Post:  " line",
+								Post:  " line\n",
 							},
 						},
-						After: "second snippet\nthird thing",
+						After: "second snippet\nthird thing\n",
 					},
 				},
 			},
@@ -477,7 +475,7 @@ func TestContextLines(t *testing.T) {
 								Post:  "",
 							},
 						},
-						Before: "fifth block\nsixth example",
+						Before: "fifth block\nsixth example\n",
 					},
 				},
 			},
@@ -498,7 +496,7 @@ func TestContextLines(t *testing.T) {
 								Post:  "",
 							},
 						},
-						Before: "one line\nsecond snippet\nthird thing\nfourth\nfifth block\nsixth example",
+						Before: "one line\nsecond snippet\nthird thing\nfourth\nfifth block\nsixth example\n",
 					},
 				},
 			},
@@ -516,7 +514,7 @@ func TestContextLines(t *testing.T) {
 							{
 								Pre:   "",
 								Match: "one",
-								Post:  " line",
+								Post:  " line\n",
 							},
 						},
 						After: "second snippet\nthird thing\nfourth\nfifth block\nsixth example\nseventh",
@@ -537,10 +535,11 @@ func TestContextLines(t *testing.T) {
 							{
 								Pre:   "\t",
 								Match: "trois",
+								Post:  "\n",
 							},
 						},
-						Before: "un   \n ",
-						After:  "     \n",
+						Before: "un   \n \n",
+						After:  "     \n\n",
 					},
 				},
 			},
@@ -558,16 +557,11 @@ func TestContextLines(t *testing.T) {
 							{
 								Pre:   "to carry ",
 								Match: "water",
-								Post:  " in the no later bla",
+								Post:  " in the no later bla\n",
 							},
 						},
-						// Returns 3 instead of 4 new line characters since we swallow
-						// the last new line in Before, Fragments and After.
-						Before: "\n\n\n",
-						// Returns 2 instead of 3 new line characters since a
-						// trailing newline at the end of the file does not
-						// constitue a new line.
-						After: "\n\n",
+						Before: "\n\n\n\n",
+						After:  "\n\n\n",
 					},
 				},
 			},
@@ -585,10 +579,11 @@ func TestContextLines(t *testing.T) {
 							{
 								Pre:   "",
 								Match: "pastures",
+								Post:  "\n",
 							},
 						},
-						Before: "green",
-						After:  "",
+						Before: "green\n",
+						After:  "\n",
 					},
 				},
 			},
@@ -964,61 +959,6 @@ func TestHealthz(t *testing.T) {
 	if reflect.DeepEqual(result, zoekt.SearchResult{}) {
 		t.Fatal("empty result in response")
 	}
-}
-
-func TestRPC(t *testing.T) {
-	b, err := zoekt.NewIndexBuilder(&zoekt.Repository{
-		Name:                 "name",
-		URL:                  "repo-url",
-		CommitURLTemplate:    "{{.Version}}",
-		FileURLTemplate:      "file-url",
-		LineFragmentTemplate: "#line",
-		Branches:             []zoekt.RepositoryBranch{{Name: "master", Version: "1234"}},
-	})
-	if err != nil {
-		t.Fatalf("NewIndexBuilder: %v", err)
-	}
-	if err := b.Add(zoekt.Document{
-		Name:    "f2",
-		Content: []byte("to carry water in the no later bla"),
-		// --------------0123456789012345678901234567890123
-		// --------------0         1         2         3
-		Branches: []string{"master"},
-	}); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-
-	s := searcherForTest(t, b)
-	srv := Server{
-		Searcher: s,
-		RPC:      true,
-		Top:      Top,
-	}
-
-	mux, err := NewMux(&srv)
-	if err != nil {
-		t.Fatalf("NewMux: %v", err)
-	}
-
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	endpoint := ts.Listener.Addr().String()
-
-	client := stream.NewClient("http://"+endpoint, nil).WithSearcher(rpc.Client(endpoint))
-
-	ctx := context.Background()
-	q := &query.Substring{Pattern: "water"}
-	opts := &zoekt.SearchOptions{ChunkMatches: true}
-	opts.SetDefaults()
-	results, err := client.Search(ctx, q, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	assertResults(t, results.Files, "f2: to carry water in the no later bla")
-
-	// TODO grpc, List, StreamSearch
 }
 
 func assertResults(t *testing.T, files []zoekt.FileMatch, want string) {

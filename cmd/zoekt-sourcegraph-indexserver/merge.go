@@ -16,8 +16,6 @@ import (
 	"github.com/xvandish/zoekt"
 )
 
-var reCompound = regexp.MustCompile(`compound-.*\.zoekt`)
-
 var metricShardMergingRunning = promauto.NewGauge(prometheus.GaugeOpts{
 	Name: "index_shard_merging_running",
 	Help: "Set to 1 if indexserver's merge job is running.",

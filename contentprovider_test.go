@@ -34,8 +34,11 @@ func TestGetLines(t *testing.T) {
 	for _, content := range contents {
 		t.Run("", func(t *testing.T) {
 			newLines := getNewlines(content)
-			// Trim the last newline before splitting because a trailing newline does not constitute a new line
-			lines := bytes.Split(bytes.TrimSuffix(content, []byte{'\n'}), []byte{'\n'})
+			lines := bytes.SplitAfter(content, []byte{'\n'})
+			if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
+				// A trailing newline does not delimit an empty line at the end of a file
+				lines = lines[:len(lines)-1]
+			}
 			wantGetLines := func(low, high int) []byte {
 				low--
 				high--
@@ -51,7 +54,7 @@ func TestGetLines(t *testing.T) {
 				if high > len(lines) {
 					high = len(lines)
 				}
-				return bytes.Join(lines[low:high], []byte{'\n'})
+				return bytes.Join(lines[low:high], nil)
 			}
 
 			for low := -1; low <= len(lines)+2; low++ {
@@ -72,32 +75,32 @@ func TestAtOffset(t *testing.T) {
 		data       []byte
 		offset     uint32
 		lineNumber int
-		lineStart  int
-		lineEnd    int
+		lineStart  uint32
+		lineEnd    uint32
 	}{{
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		offset:     0,
-		lineNumber: 1, lineStart: 0, lineEnd: 6,
+		lineNumber: 1, lineStart: 0, lineEnd: 7,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		offset:     6,
-		lineNumber: 1, lineStart: 0, lineEnd: 6,
+		lineNumber: 1, lineStart: 0, lineEnd: 7,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		offset:     2,
-		lineNumber: 1, lineStart: 0, lineEnd: 6,
+		lineNumber: 1, lineStart: 0, lineEnd: 7,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		offset:     2,
-		lineNumber: 1, lineStart: 0, lineEnd: 6,
+		lineNumber: 1, lineStart: 0, lineEnd: 7,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		offset:     7,
-		lineNumber: 2, lineStart: 7, lineEnd: 14,
+		lineNumber: 2, lineStart: 7, lineEnd: 15,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		offset:     11,
-		lineNumber: 2, lineStart: 7, lineEnd: 14,
+		lineNumber: 2, lineStart: 7, lineEnd: 15,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		offset:     15,
@@ -109,11 +112,11 @@ func TestAtOffset(t *testing.T) {
 	}, {
 		data:       []byte("\n\n"),
 		offset:     0,
-		lineNumber: 1, lineStart: 0, lineEnd: 0,
+		lineNumber: 1, lineStart: 0, lineEnd: 1,
 	}, {
 		data:       []byte("\n\n"),
 		offset:     1,
-		lineNumber: 2, lineStart: 1, lineEnd: 1,
+		lineNumber: 2, lineStart: 1, lineEnd: 2,
 	}, {
 		data:       []byte("\n\n"),
 		offset:     3,
@@ -127,14 +130,14 @@ func TestAtOffset(t *testing.T) {
 	for _, tt := range cases {
 		t.Run("", func(t *testing.T) {
 			nls := getNewlines(tt.data)
-			gotLineNumber, gotLineStart, gotLineEnd := nls.atOffset(tt.offset)
+			gotLineNumber := nls.atOffset(tt.offset)
 			if gotLineNumber != tt.lineNumber {
 				t.Fatalf("expected line number %d, got %d", tt.lineNumber, gotLineNumber)
 			}
-			if gotLineStart != tt.lineStart {
+			if gotLineStart := nls.lineStart(gotLineNumber); gotLineStart != tt.lineStart {
 				t.Fatalf("expected line start %d, got %d", tt.lineStart, gotLineStart)
 			}
-			if gotLineEnd != tt.lineEnd {
+			if gotLineEnd := nls.lineStart(gotLineNumber + 1); gotLineEnd != tt.lineEnd {
 				t.Fatalf("expected line end %d, got %d", tt.lineEnd, gotLineEnd)
 			}
 		})
@@ -150,11 +153,11 @@ func TestLineBounds(t *testing.T) {
 	}{{
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		lineNumber: 1,
-		start:      0, end: 6,
+		start:      0, end: 7,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		lineNumber: 2,
-		start:      7, end: 14,
+		start:      7, end: 15,
 	}, {
 		data:       []byte("0.2.4.\n7.9.11.\n"),
 		lineNumber: 0,
@@ -170,11 +173,11 @@ func TestLineBounds(t *testing.T) {
 	}, {
 		data:       []byte("\n\n"),
 		lineNumber: 1,
-		start:      0, end: 0,
+		start:      0, end: 1,
 	}, {
 		data:       []byte("\n\n"),
 		lineNumber: 2,
-		start:      1, end: 1,
+		start:      1, end: 2,
 	}, {
 		data:       []byte("\n\n"),
 		lineNumber: 3,
@@ -184,10 +187,11 @@ func TestLineBounds(t *testing.T) {
 	for _, tt := range cases {
 		t.Run("", func(t *testing.T) {
 			nls := getNewlines(tt.data)
-			gotStart, gotEnd := nls.lineBounds(tt.lineNumber)
+			gotStart := nls.lineStart(tt.lineNumber)
 			if gotStart != tt.start {
 				t.Fatalf("expected line start %d, got %d", tt.start, gotStart)
 			}
+			gotEnd := nls.lineStart(tt.lineNumber + 1)
 			if gotEnd != tt.end {
 				t.Fatalf("expected line end %d, got %d", tt.end, gotEnd)
 			}
@@ -405,5 +409,58 @@ func TestColumnHelper(t *testing.T) {
 	// Now make sure if we go backwards we do not incorrectly use the cache
 	if got := ch.get(6, 6); got != 1 {
 		t.Fatal("unexpected value for backwards call for first column on second line", got)
+	}
+}
+
+func TestFindMaxOverlappingSection(t *testing.T) {
+	secs := []DocumentSection{
+		{Start: 0, End: 5},
+		{Start: 8, End: 19},
+		{Start: 22, End: 26},
+	}
+	// 012345678901234567890123456
+	// [....[
+	//         [..........[
+	//                       [...[
+
+	testcases := []struct {
+		name        string
+		off         uint32
+		sz          uint32
+		wantSecIdx  uint32
+		wantOverlap bool
+	}{
+		{off: 0, sz: 1, wantSecIdx: 0, wantOverlap: true},
+		{off: 0, sz: 5, wantSecIdx: 0, wantOverlap: true},
+		{off: 2, sz: 5, wantSecIdx: 0, wantOverlap: true},
+		{off: 2, sz: 50, wantSecIdx: 1, wantOverlap: true},
+		{off: 4, sz: 10, wantSecIdx: 1, wantOverlap: true},
+		{off: 5, sz: 15, wantSecIdx: 1, wantOverlap: true},
+		{off: 18, sz: 10, wantSecIdx: 2, wantOverlap: true},
+
+		// Prefer full overlap, break ties by preferring the earlier section
+		{off: 10, sz: 20, wantSecIdx: 2, wantOverlap: true},
+		{off: 0, sz: 100, wantSecIdx: 0, wantOverlap: true},
+		{off: 8, sz: 100, wantSecIdx: 1, wantOverlap: true},
+		{off: 0, sz: 10, wantSecIdx: 0, wantOverlap: true},
+		{off: 16, sz: 10, wantSecIdx: 2, wantOverlap: true},
+
+		// No overlap
+		{off: 5, sz: 2, wantOverlap: false},
+		{off: 20, sz: 1, wantOverlap: false},
+		{off: 99, sz: 1, wantOverlap: false},
+		{off: 0, sz: 0, wantOverlap: false},
+	}
+
+	for _, tt := range testcases {
+		t.Run(fmt.Sprintf("off=%d size=%d", tt.off, tt.sz), func(t *testing.T) {
+			got, haveOverlap := findMaxOverlappingSection(secs, tt.off, tt.sz)
+			if haveOverlap != tt.wantOverlap {
+				t.Fatalf("expected overlap %v, got %v", tt.wantOverlap, haveOverlap)
+			}
+			if got != tt.wantSecIdx {
+				t.Fatalf("expected section %d, got %d", tt.wantSecIdx, got)
+			}
+		})
 	}
 }

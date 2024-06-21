@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -111,6 +112,11 @@ func FindGitRepos(dir string) ([]string, error) {
 // setTemplates fills in URL templates for known git hosting
 // sites.
 func setTemplates(repo *zoekt.Repository, u *url.URL, typ string) error {
+	if u.Scheme == "ssh+git" {
+		u.Scheme = "https"
+		u.User = nil
+	}
+
 	repo.URL = u.String()
 	switch typ {
 	case "gitiles":
@@ -192,6 +198,8 @@ func configLookupRemoteURL(cfg *config.Config, key string) string {
 	return rc.URLs[0]
 }
 
+var sshRelativeURLRegexp = regexp.MustCompile(`^([^@]+)@([^:]+):(.*)$`)
+
 func setTemplatesFromConfig(desc *zoekt.Repository, repoDir string) error {
 	repo, err := git.PlainOpen(repoDir)
 	if err != nil {
@@ -228,6 +236,14 @@ func setTemplatesFromConfig(desc *zoekt.Repository, repoDir string) error {
 		if remoteURL == "" {
 			return nil
 		}
+		if sm := sshRelativeURLRegexp.FindStringSubmatch(remoteURL); sm != nil {
+			user := sm[1]
+			host := sm[2]
+			path := sm[3]
+
+			remoteURL = fmt.Sprintf("ssh+git://%s@%s/%s", user, host, path)
+		}
+
 		u, err := url.Parse(remoteURL)
 		if err != nil {
 			return err
@@ -402,12 +418,16 @@ func expandBranches(repo *git.Repository, bs []string, prefix string, doRevParse
 }
 
 // IndexGitRepo indexes the git repository as specified by the options.
-func IndexGitRepo(opts Options) error {
+// The returned bool indicates whether the index was updated as a result. This
+// can be informative if doing incremental indexing.
+func IndexGitRepo(opts Options) (bool, error) {
 	return indexGitRepo(opts, gitIndexConfig{})
 }
 
 // indexGitRepo indexes the git repository as specified by the options and the provided gitIndexConfig.
-func indexGitRepo(opts Options, config gitIndexConfig) error {
+// The returned bool indicates whether the index was updated as a result. This
+// can be informative if doing incremental indexing.
+func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 	prepareDeltaBuild := prepareDeltaBuild
 	if config.prepareDeltaBuild != nil {
 		prepareDeltaBuild = config.prepareDeltaBuild
@@ -421,13 +441,13 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 	// Set max thresholds, since we use them in this function.
 	opts.BuildOptions.SetDefaults()
 	if opts.RepoDir == "" {
-		return fmt.Errorf("gitindex: must set RepoDir")
+		return false, fmt.Errorf("gitindex: must set RepoDir")
 	}
 
 	opts.BuildOptions.RepositoryDescription.Source = opts.RepoDir
 	repo, err := git.PlainOpen(opts.RepoDir)
 	if err != nil {
-		return fmt.Errorf("git.PlainOpen: %w", err)
+		return false, fmt.Errorf("git.PlainOpen: %w", err)
 	}
 
 	if err := setTemplatesFromConfig(&opts.BuildOptions.RepositoryDescription, opts.RepoDir); err != nil {
@@ -436,7 +456,7 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 
 	branches, revParsedHEAD, err := expandBranches(repo, opts.Branches, opts.BranchPrefix, opts.DoRevParseHead)
 	if err != nil {
-		return fmt.Errorf("expandBranches: %w", err)
+		return false, fmt.Errorf("expandBranches: %w", err)
 	}
 	// harmless to set this even if !opts.DoRevParseHead, since it will just be an empty string
 	opts.BuildOptions.RepositoryDescription.HEADRevParsedName = revParsedHEAD
@@ -448,7 +468,7 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 				continue
 			}
 
-			return fmt.Errorf("getCommit(%q, %q): %w", opts.BranchPrefix, b, err)
+			return false, fmt.Errorf("getCommit(%q, %q): %w", opts.BranchPrefix, b, err)
 		}
 
 		opts.BuildOptions.RepositoryDescription.Branches = append(opts.BuildOptions.RepositoryDescription.Branches, zoekt.RepositoryBranch{
@@ -462,7 +482,7 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 	}
 
 	if opts.Incremental && opts.BuildOptions.IncrementalSkipIndexing() {
-		return nil
+		return false, nil
 	}
 
 	// branch => (path, sha1) => repo.
@@ -491,7 +511,7 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 	if !opts.BuildOptions.IsDelta {
 		repos, branchMap, branchVersions, err = prepareNormalBuild(opts, repo, branches)
 		if err != nil {
-			return fmt.Errorf("preparing normal build: %w", err)
+			return false, fmt.Errorf("preparing normal build: %w", err)
 		}
 	}
 
@@ -524,7 +544,7 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 
 	builder, err := build.NewBuilder(opts.BuildOptions)
 	if err != nil {
-		return fmt.Errorf("build.NewBuilder: %w", err)
+		return false, fmt.Errorf("build.NewBuilder: %w", err)
 	}
 
 	var ranks repoPathRanks
@@ -532,12 +552,12 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 	if opts.BuildOptions.DocumentRanksPath != "" {
 		data, err := os.ReadFile(opts.BuildOptions.DocumentRanksPath)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		err = json.Unmarshal(data, &ranks)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		// Compute the mean rank for this repository. Note: we overwrite the rank
@@ -581,16 +601,16 @@ func indexGitRepo(opts Options, config gitIndexConfig) error {
 		for _, key := range keys {
 			doc, err := createDocument(key, repos, branchMap, ranks, opts.BuildOptions)
 			if err != nil {
-				return err
+				return false, err
 			}
 
 			if err := builder.Add(doc); err != nil {
-				return fmt.Errorf("error adding document with name %s: %w", key.FullPath(), err)
+				return false, fmt.Errorf("error adding document with name %s: %w", key.FullPath(), err)
 			}
 		}
 	}
 
-	return builder.Finish()
+	return true, builder.Finish()
 }
 
 type repoPathRanks struct {

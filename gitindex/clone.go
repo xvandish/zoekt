@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +113,8 @@ func CloneRepo(destDir, name, cloneURL string, settings map[string]string) (stri
 	repoDest := filepath.Join(parent, filepath.Base(name)+".git")
 	if _, err := os.Lstat(repoDest); err == nil {
 		// Repository exists, ensure settings are in sync
+		settings := maps.Clone(settings)
+		settings["remote.origin.url"] = cloneURL
 		hadUpdate, err := updateZoektGitConfig(repoDest, settings)
 		if err != nil {
 			return "", fmt.Errorf("failed to update repository settings: %w", err)

@@ -141,6 +141,7 @@ type ChunkMatch struct {
 	DebugScore string
 
 	// Content is a contiguous range of complete lines that fully contains Ranges.
+	// Lines will always include their terminating newline (if it exists).
 	Content []byte
 
 	// Ranges is a set of matching ranges within this chunk. Each range is relative
@@ -224,8 +225,12 @@ func (l *Location) sizeBytes() uint64 {
 // LineMatch holds the matches within a single line in a file.
 type LineMatch struct {
 	// The line in which a match was found.
-	Line       []byte
-	LineStart  int
+	Line []byte
+	// The byte offset of the first byte of the line.
+	LineStart int
+	// The byte offset of the first byte past the end of the line.
+	// This is usually the byte after the terminating newline, but can also be
+	// the end of the file if there is no terminating newline
 	LineEnd    int
 	LineNumber int
 
@@ -665,8 +670,6 @@ func (r *Repository) UnmarshalJSON(data []byte) error {
 //
 // Note: We ignore RawConfig fields which are duplicated into Repository:
 // name and id.
-//
-// Note: URL, *Template fields are ignored. They are not used by Sourcegraph.
 func (r *Repository) MergeMutable(x *Repository) (mutated bool, err error) {
 	if r.ID != x.ID {
 		// Sourcegraph: strange behaviour may occur if ID changes but names don't.
@@ -695,6 +698,23 @@ func (r *Repository) MergeMutable(x *Repository) (mutated bool, err error) {
 			mutated = true
 			r.RawConfig[k] = v
 		}
+	}
+
+	if r.URL != x.URL {
+		mutated = true
+		r.URL = x.URL
+	}
+	if r.CommitURLTemplate != x.CommitURLTemplate {
+		mutated = true
+		r.CommitURLTemplate = x.CommitURLTemplate
+	}
+	if r.FileURLTemplate != x.FileURLTemplate {
+		mutated = true
+		r.FileURLTemplate = x.FileURLTemplate
+	}
+	if r.LineFragmentTemplate != x.LineFragmentTemplate {
+		mutated = true
+		r.LineFragmentTemplate = x.LineFragmentTemplate
 	}
 
 	return mutated, nil
@@ -935,10 +955,16 @@ type SearchOptions struct {
 	// will be used. This option is temporary and is only exposed for testing/ tuning purposes.
 	DocumentRanksWeight float64
 
-	// EXPERIMENTAL. If true, use keyword-style scoring instead of the default scoring formula.
-	// Currently, this treats each match in a file as a term and computes an approximation to BM25.
+	// EXPERIMENTAL. If true, use text-search style scoring instead of the default
+	// scoring formula. The scoring algorithm treats each match in a file as a term
+	// and computes an approximation to BM25.
+	//
+	// The calculation of IDF assumes that Zoekt visits all documents containing any
+	// of the query terms during evaluation. This is true, for example, if all query
+	// terms are ORed together.
+	//
 	// When enabled, all other scoring signals are ignored, including document ranks.
-	UseKeywordScoring bool
+	UseBM25Scoring bool
 
 	// Trace turns on opentracing for this request if true and if the Jaeger address was provided as
 	// a command-line flag
@@ -1014,7 +1040,7 @@ func (s *SearchOptions) String() string {
 	addBool("Whole", s.Whole)
 	addBool("ChunkMatches", s.ChunkMatches)
 	addBool("UseDocumentRanks", s.UseDocumentRanks)
-	addBool("UseKeywordScoring", s.UseKeywordScoring)
+	addBool("UseBM25Scoring", s.UseBM25Scoring)
 	addBool("Trace", s.Trace)
 	addBool("DebugScore", s.DebugScore)
 
@@ -1032,6 +1058,15 @@ func (s *SearchOptions) String() string {
 // Sender is the interface that wraps the basic Send method.
 type Sender interface {
 	Send(*SearchResult)
+}
+
+// SenderFunc is an adapter to allow the use of ordinary functions as Sender.
+// If f is a function with the appropriate signature, SenderFunc(f) is a Sender
+// that calls f.
+type SenderFunc func(result *SearchResult)
+
+func (f SenderFunc) Send(result *SearchResult) {
+	f(result)
 }
 
 // Streamer adds the method StreamSearch to the Searcher interface.

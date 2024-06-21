@@ -5,7 +5,6 @@ import (
 
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/stream"
 	"github.com/xvandish/zoekt/trace"
 )
 
@@ -59,7 +58,7 @@ func (s *typeRepoSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zo
 		return err
 	}
 
-	return s.Streamer.StreamSearch(ctx, q, opts, stream.SenderFunc(func(event *zoekt.SearchResult) {
+	return s.Streamer.StreamSearch(ctx, q, opts, zoekt.SenderFunc(func(event *zoekt.SearchResult) {
 		stats.Add(event.Stats)
 		sender.Send(event)
 	}))

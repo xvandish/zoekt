@@ -201,8 +201,8 @@ func (s *memSeeker) Size() (uint32, error) {
 
 func TestNewlines(t *testing.T) {
 	b := testIndexBuilder(t, nil,
+		// -----------------------------------------012345-678901-234
 		Document{Name: "filename", Content: []byte("line1\nline2\nbla")})
-	// ---------------------------------------------012345-678901-234
 
 	t.Run("LineMatches", func(t *testing.T) {
 		sres := searchForTest(t, b, &query.Substring{Pattern: "ne2"})
@@ -216,15 +216,15 @@ func TestNewlines(t *testing.T) {
 					LineOffset:  2,
 					MatchLength: 3,
 				}},
-				Line:       []byte("line2"),
+				Line:       []byte("line2\n"),
 				LineStart:  6,
-				LineEnd:    11,
+				LineEnd:    12,
 				LineNumber: 2,
 			}},
 		}}
 
-		if !reflect.DeepEqual(matches, want) {
-			t.Errorf("got %v, want %v", matches, want)
+		if diff := cmp.Diff(matches, want); diff != "" {
+			t.Fatal(diff)
 		}
 	})
 
@@ -235,7 +235,7 @@ func TestNewlines(t *testing.T) {
 		want := []FileMatch{{
 			FileName: "filename",
 			ChunkMatches: []ChunkMatch{{
-				Content: []byte("line2"),
+				Content: []byte("line2\n"),
 				ContentStart: Location{
 					ByteOffset: 6,
 					LineNumber: 2,
@@ -269,7 +269,7 @@ func TestQueryNewlines(t *testing.T) {
 		}
 		m := matches[0]
 		if len(m.LineMatches) != 2 {
-			t.Fatalf("got %d line matches, want exactly two", len(m.LineMatches))
+			t.Fatalf("got %d line matches, want exactly two %#v", len(m.LineMatches), m.LineMatches)
 		}
 	})
 
@@ -441,7 +441,7 @@ func TestSearchStats(t *testing.T) {
 			Want: Stats{
 				FilesLoaded:        1,
 				ContentBytesLoaded: 22,
-				IndexBytesLoaded:   8,
+				IndexBytesLoaded:   10,
 				NgramMatches:       3, // we look at doc 1, because it's max(0,1) due to AND
 				NgramLookups:       104,
 				MatchCount:         2,
@@ -556,7 +556,7 @@ func TestSearchStats(t *testing.T) {
 			}},
 			Want: Stats{
 				ContentBytesLoaded: 33, // we still have to run regex since "app" matches two documents
-				IndexBytesLoaded:   8,
+				IndexBytesLoaded:   10,
 				FilesConsidered:    2, // important that we don't check 3 to ensure we are using the index
 				FilesLoaded:        2,
 				MatchCount:         0, // even though there is a match it doesn't align with a symbol
@@ -2452,7 +2452,7 @@ func TestIOStats(t *testing.T) {
 		res := searchForTest(t, b, q)
 
 		// 4096 (content) + 2 (overhead: newlines or doc sections)
-		if got, want := res.Stats.ContentBytesLoaded, int64(4098); got != want {
+		if got, want := res.Stats.ContentBytesLoaded, int64(4100); got != want {
 			t.Errorf("got content I/O %d, want %d", got, want)
 		}
 
@@ -3449,6 +3449,7 @@ func TestSearchTypeLanguage(t *testing.T) {
 		Document{Name: "apex.cls", Content: []byte("public class Car extends Vehicle {")},
 		Document{Name: "tex.cls", Content: []byte(`\DeclareOption*{`)},
 		Document{Name: "hello.h", Content: []byte(`#include <stdio.h>`)},
+		Document{Name: "be.magik", Content: []byte(`_package unicorn`)},
 	)
 
 	t.Log(b.languageMap)
@@ -3485,6 +3486,9 @@ func TestSearchTypeLanguage(t *testing.T) {
 
 		res = searchForTest(t, b, &query.Language{Language: "C"})
 		wantSingleMatch(res, "hello.h")
+
+		res = searchForTest(t, b, &query.Language{Language: "Magik"})
+		wantSingleMatch(res, "be.magik")
 
 		// test fallback language search by pretending it's an older index version
 		res = searchForTest(t, b, &query.Language{Language: "C++"})

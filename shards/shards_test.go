@@ -37,7 +37,6 @@ import (
 
 	"github.com/xvandish/zoekt"
 	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/stream"
 )
 
 type crashSearcher struct{}
@@ -258,7 +257,7 @@ func TestShardedSearcher_DocumentRanking(t *testing.T) {
 	}
 
 	err := ss.StreamSearch(context.Background(), &query.Substring{Pattern: "foo"}, opts,
-		stream.SenderFunc(func(event *zoekt.SearchResult) {
+		zoekt.SenderFunc(func(event *zoekt.SearchResult) {
 			results = append(results, event)
 		}))
 	if err != nil {
@@ -288,12 +287,16 @@ func TestShardedSearcher_DocumentRanking(t *testing.T) {
 func TestFilteringShardsByRepoSetOrBranchesReposOrRepoIDs(t *testing.T) {
 	ss := newShardedSearcher(1)
 
+	// namePrefix is so we can create a repo:foo filter and match the same set
+	// of repos.
+	namePrefix := [3]string{"foo", "bar", "baz"}
+
 	repoSetNames := []string{}
 	repoIDs := []uint32{}
 	n := 10 * runtime.GOMAXPROCS(0)
 	for i := 0; i < n; i++ {
 		shardName := fmt.Sprintf("shard%d", i)
-		repoName := fmt.Sprintf("repository%.3d", i)
+		repoName := fmt.Sprintf("%s-repository%.3d", namePrefix[i%3], i)
 		repoID := hash(repoName)
 
 		if i%3 == 0 {
@@ -329,6 +332,7 @@ func TestFilteringShardsByRepoSetOrBranchesReposOrRepoIDs(t *testing.T) {
 	sub := &query.Substring{Pattern: "bla"}
 
 	repoIDsQuery := query.NewRepoIDs(repoIDs...)
+	repoQuery := &query.Repo{Regexp: regexp.MustCompile("^foo-.*")}
 
 	queries := []query.Q{
 		query.NewAnd(set, sub),
@@ -342,6 +346,19 @@ func TestFilteringShardsByRepoSetOrBranchesReposOrRepoIDs(t *testing.T) {
 		query.NewAnd(repoIDsQuery, sub),
 		// Test with the same repoIDs again
 		query.NewAnd(repoIDsQuery, sub),
+
+		query.NewAnd(repoQuery, sub),
+		query.NewAnd(repoQuery, sub),
+
+		// List has queries which are just the reposet atoms. We also test twice.
+		set,
+		set,
+		branchesRepos,
+		branchesRepos,
+		repoIDsQuery,
+		repoIDsQuery,
+		repoQuery,
+		repoQuery,
 	}
 
 	for _, q := range queries {
@@ -1070,7 +1087,7 @@ func TestAtomCountScore(t *testing.T) {
 	}
 }
 
-func TestUseKeywordScoring(t *testing.T) {
+func TestUseBM25Scoring(t *testing.T) {
 	b := testIndexBuilder(t,
 		&zoekt.Repository{},
 		zoekt.Document{Name: "f1", Content: []byte("one two two three")},
@@ -1086,7 +1103,7 @@ func TestUseKeywordScoring(t *testing.T) {
 		&query.Substring{Pattern: "three"})
 
 	opts := zoekt.SearchOptions{
-		UseKeywordScoring: true,
+		UseBM25Scoring: true,
 	}
 
 	results, err := ss.Search(context.Background(), q, &opts)
@@ -1111,7 +1128,7 @@ func testShardedStreamSearch(t *testing.T, q query.Q, ib *zoekt.IndexBuilder, us
 	ss.replace(map[string]zoekt.Searcher{"r1": searcher})
 
 	var files []zoekt.FileMatch
-	sender := stream.SenderFunc(func(result *zoekt.SearchResult) {
+	sender := zoekt.SenderFunc(func(result *zoekt.SearchResult) {
 		files = append(files, result.Files...)
 	})
 

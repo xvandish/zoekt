@@ -18,10 +18,8 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"regexp/syntax"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -30,31 +28,6 @@ import (
 
 	"github.com/xvandish/zoekt/query"
 )
-
-const maxUInt16 = 0xffff
-
-// addScore increments the score of the FileMatch by the computed score. If
-// debugScore is true, it also adds a debug string to the FileMatch. If raw is
-// -1, it is ignored. Otherwise, it is added to the debug string.
-func (m *FileMatch) addScore(what string, computed float64, raw float64, debugScore bool) {
-	if computed != 0 && debugScore {
-		var b strings.Builder
-		fmt.Fprintf(&b, "%s", what)
-		if raw != -1 {
-			fmt.Fprintf(&b, "(%s)", strconv.FormatFloat(raw, 'f', -1, 64))
-		}
-		fmt.Fprintf(&b, ":%.2f, ", computed)
-		m.Debug += b.String()
-	}
-	m.Score += computed
-}
-
-func (m *FileMatch) addKeywordScore(score float64, sumTf float64, L float64, debugScore bool) {
-	if debugScore {
-		m.Debug += fmt.Sprintf("keyword-score:%.2f (sum-tf: %.2f, length-ratio: %.2f)", score, sumTf, L)
-	}
-	m.Score += score
-}
 
 // simplifyMultiRepo takes a query and a predicate. It returns Const(true) if all
 // repository names fulfill the predicate, Const(false) if none of them do, and q
@@ -224,6 +197,12 @@ func (d *indexData) Search(ctx context.Context, q query.Q, opts *SearchOptions) 
 	docCount := uint32(len(d.fileBranchMasks))
 	lastDoc := int(-1)
 
+	// document frequency per term
+	df := make(termDocumentFrequency)
+
+	// term frequency per file match
+	var tfs []termFrequency
+
 nextFileMatch:
 	for {
 		canceled := false
@@ -336,22 +315,7 @@ nextFileMatch:
 		// non-overlapping. gatherMatches respects this invariant and all later
 		// transformations respect this.
 		shouldMergeMatches := !opts.ChunkMatches
-		finalCands := gatherMatches(mt, known, shouldMergeMatches)
-
-		if len(finalCands) == 0 {
-			nm := d.fileName(nextDoc)
-			finalCands = append(finalCands,
-				&candidateMatch{
-					caseSensitive: false,
-					fileName:      true,
-					substrBytes:   nm,
-					substrLowered: nm,
-					file:          nextDoc,
-					runeOffset:    0,
-					byteOffset:    0,
-					byteMatchSz:   uint32(len(nm)),
-				})
-		}
+		finalCands := d.gatherMatches(nextDoc, mt, known, shouldMergeMatches)
 
 		if opts.ChunkMatches {
 			fileMatch.ChunkMatches = cp.fillChunkMatches(finalCands, opts.NumContextLines, fileMatch.Language, opts.DebugScore)
@@ -359,8 +323,14 @@ nextFileMatch:
 			fileMatch.LineMatches = cp.fillMatches(finalCands, opts.NumContextLines, fileMatch.Language, opts.DebugScore)
 		}
 
-		if opts.UseKeywordScoring {
-			d.scoreFileUsingBM25(&fileMatch, nextDoc, finalCands, opts)
+		var tf map[string]int
+		if opts.UseBM25Scoring {
+			// For BM25 scoring, the calculation of the score is split in two parts. Here we
+			// calculate the term frequencies for the current document and update the
+			// document frequencies. Since we don't store document frequencies in the index,
+			// we have to defer the calculation of the final BM25 score to after the whole
+			// shard has been processed.
+			tf = calculateTermFrequency(finalCands, df)
 		} else {
 			// Use the standard, non-experimental scoring method by default
 			d.scoreFile(&fileMatch, nextDoc, mt, known, opts)
@@ -381,19 +351,27 @@ nextFileMatch:
 		repoMatchCount += len(fileMatch.LineMatches)
 		repoMatchCount += matchedChunkRanges
 
-		if opts.DebugScore {
-			fileMatch.Debug = fmt.Sprintf("score:%.2f <- %s", fileMatch.Score, fileMatch.Debug)
+		if opts.UseBM25Scoring {
+			// Invariant: tfs[i] belongs to res.Files[i]
+			tfs = append(tfs, termFrequency{
+				doc: nextDoc,
+				tf:  tf,
+			})
 		}
-
 		res.Files = append(res.Files, fileMatch)
+
 		res.Stats.MatchCount += len(fileMatch.LineMatches)
 		res.Stats.MatchCount += matchedChunkRanges
 		res.Stats.FileCount++
 	}
 
-	// We do not sort Files here, instead we rely on the shards pkg to do file
-	// ranking. If we sorted now, we would break the assumption that results
-	// from the same repo in a shard appear next to each other.
+	// Calculate BM25 score for all file matches in the shard. We assume that we
+	// have seen all documents containing any of the terms in the query so that df
+	// correctly reflects the document frequencies. This is true, for example, if
+	// all terms in the query are ORed together.
+	if opts.UseBM25Scoring {
+		d.scoreFilesUsingBM25(res.Files, tfs, df, opts)
+	}
 
 	if !opts.ExcludeRepoURLsAndLineFragments {
 		for _, md := range d.repoMetaData {
@@ -418,110 +396,6 @@ nextFileMatch:
 	return &res, nil
 }
 
-// scoreFile computes a score for the file match using various scoring signals, like
-// whether there's an exact match on a symbol, the number of query clauses that matched, etc.
-func (d *indexData) scoreFile(fileMatch *FileMatch, doc uint32, mt matchTree, known map[matchTree]bool, opts *SearchOptions) {
-	atomMatchCount := 0
-	visitMatchAtoms(mt, known, func(mt matchTree) {
-		atomMatchCount++
-	})
-
-	addScore := func(what string, computed float64) {
-		fileMatch.addScore(what, computed, -1, opts.DebugScore)
-	}
-
-	// atom-count boosts files with matches from more than 1 atom. The
-	// maximum boost is scoreFactorAtomMatch.
-	if atomMatchCount > 0 {
-		fileMatch.addScore("atom", (1.0-1.0/float64(atomMatchCount))*scoreFactorAtomMatch, float64(atomMatchCount), opts.DebugScore)
-	}
-
-	maxFileScore := 0.0
-	for i := range fileMatch.LineMatches {
-		if maxFileScore < fileMatch.LineMatches[i].Score {
-			maxFileScore = fileMatch.LineMatches[i].Score
-		}
-
-		// Order by ordering in file.
-		fileMatch.LineMatches[i].Score += scoreLineOrderFactor * (1.0 - (float64(i) / float64(len(fileMatch.LineMatches))))
-	}
-
-	for i := range fileMatch.ChunkMatches {
-		if maxFileScore < fileMatch.ChunkMatches[i].Score {
-			maxFileScore = fileMatch.ChunkMatches[i].Score
-		}
-
-		// Order by ordering in file.
-		fileMatch.ChunkMatches[i].Score += scoreLineOrderFactor * (1.0 - (float64(i) / float64(len(fileMatch.ChunkMatches))))
-	}
-
-	// Maintain ordering of input files. This
-	// strictly dominates the in-file ordering of
-	// the matches.
-	addScore("fragment", maxFileScore)
-
-	if opts.UseDocumentRanks && len(d.ranks) > int(doc) {
-		weight := scoreFileRankFactor
-		if opts.DocumentRanksWeight > 0.0 {
-			weight = opts.DocumentRanksWeight
-		}
-
-		ranks := d.ranks[doc]
-		// The ranks slice always contains one entry representing the file rank (unless it's empty since the
-		// file doesn't have a rank). This is left over from when documents could have multiple rank signals,
-		// and we plan to clean this up.
-		if len(ranks) > 0 {
-			// The file rank represents a log (base 2) count. The log ranks should be bounded at 32, but we
-			// cap it just in case to ensure it falls in the range [0, 1].
-			normalized := math.Min(1.0, ranks[0]/32.0)
-			addScore("file-rank", weight*normalized)
-		}
-	}
-
-	md := d.repoMetaData[d.repos[doc]]
-	addScore("doc-order", scoreFileOrderFactor*(1.0-float64(doc)/float64(len(d.boundaries))))
-	addScore("repo-rank", scoreRepoRankFactor*float64(md.Rank)/maxUInt16)
-
-	if opts.DebugScore {
-		fileMatch.Debug = strings.TrimSuffix(fileMatch.Debug, ", ")
-	}
-}
-
-// scoreFileUsingBM25 computes a score for the file match using an approximation to BM25, the most common scoring
-// algorithm for keyword search: https://en.wikipedia.org/wiki/Okapi_BM25. It implements all parts of the formula
-// except inverse document frequency (idf), since we don't have access to global term frequency statistics.
-//
-// This scoring strategy ignores all other signals including document ranks. This keeps things simple for now,
-// since BM25 is not normalized and can be tricky to combine with other scoring signals.
-func (d *indexData) scoreFileUsingBM25(fileMatch *FileMatch, doc uint32, cands []*candidateMatch, opts *SearchOptions) {
-	// Treat each candidate match as a term and compute the frequencies. For now, ignore case
-	// sensitivity and treat filenames and symbols the same as content.
-	termFreqs := map[string]int{}
-	for _, cand := range cands {
-		term := string(cand.substrLowered)
-		termFreqs[term]++
-	}
-
-	// Compute the file length ratio. Usually the calculation would be based on terms, but using
-	// bytes should work fine, as we're just computing a ratio.
-	fileLength := float64(d.boundaries[doc+1] - d.boundaries[doc])
-	numFiles := len(d.boundaries)
-	averageFileLength := float64(d.boundaries[numFiles-1]) / float64(numFiles)
-	L := fileLength / averageFileLength
-
-	// Use standard parameter defaults (used in Lucene and academic papers)
-	k, b := 1.2, 0.75
-	sumTf := 0.0 // Just for debugging
-	score := 0.0
-	for _, freq := range termFreqs {
-		tf := float64(freq)
-		sumTf += tf
-		score += ((k + 1.0) * tf) / (k*(1.0-b+b*L) + tf)
-	}
-
-	fileMatch.addKeywordScore(score, sumTf, L, opts.DebugScore)
-}
-
 func addRepo(res *SearchResult, repo *Repository) {
 	if res.RepoURLs == nil {
 		res.RepoURLs = map[string]string{}
@@ -534,36 +408,14 @@ func addRepo(res *SearchResult, repo *Repository) {
 	res.LineFragments[repo.Name] = repo.LineFragmentTemplate
 }
 
-type sortByOffsetSlice []*candidateMatch
-
-func (m sortByOffsetSlice) Len() int      { return len(m) }
-func (m sortByOffsetSlice) Swap(i, j int) { m[i], m[j] = m[j], m[i] }
-func (m sortByOffsetSlice) Less(i, j int) bool {
-	if m[i].byteOffset == m[j].byteOffset { // tie break if same offset
-		// Prefer longer candidates if starting at same position
-		return m[i].byteMatchSz > m[j].byteMatchSz
-	}
-	return m[i].byteOffset < m[j].byteOffset
-}
-
-// setScoreWeight is a helper used by gatherMatches to set the weight based on
-// the score weight of the matchTree.
-func setScoreWeight(scoreWeight float64, cm []*candidateMatch) []*candidateMatch {
-	for _, m := range cm {
-		m.scoreWeight = scoreWeight
-	}
-	return cm
-}
-
-// Gather matches from this document. This never returns a mixture of
-// filename/content matches: if there are content matches, all
-// filename matches are trimmed from the result. The matches are
-// returned in document order and are non-overlapping.
+// Gather matches from this document. The matches are returned in document
+// order and are non-overlapping. All filename and content matches are
+// returned, with filename matches first.
 //
 // If `merge` is set, overlapping and adjacent matches will be merged
 // into a single match. Otherwise, overlapping matches will be removed,
 // but adjacent matches will remain.
-func gatherMatches(mt matchTree, known map[matchTree]bool, merge bool) []*candidateMatch {
+func (d *indexData) gatherMatches(nextDoc uint32, mt matchTree, known map[matchTree]bool, merge bool) []*candidateMatch {
 	var cands []*candidateMatch
 	visitMatches(mt, known, 1, func(mt matchTree, scoreWeight float64) {
 		if smt, ok := mt.(*substrMatchTree); ok {
@@ -580,39 +432,45 @@ func gatherMatches(mt matchTree, known map[matchTree]bool, merge bool) []*candid
 		}
 	})
 
-	foundContentMatch := false
-	for _, c := range cands {
-		if !c.fileName {
-			foundContentMatch = true
-			break
-		}
+	// If we found no candidate matches at all, assume there must have been a match on filename.
+	if len(cands) == 0 {
+		nm := d.fileName(nextDoc)
+		return []*candidateMatch{{
+			caseSensitive: false,
+			fileName:      true,
+			substrBytes:   nm,
+			substrLowered: nm,
+			file:          nextDoc,
+			runeOffset:    0,
+			byteOffset:    0,
+			byteMatchSz:   uint32(len(nm)),
+		}}
 	}
 
+	sort.Sort((sortByOffsetSlice)(cands))
 	res := cands[:0]
-	for _, c := range cands {
-		if !foundContentMatch || !c.fileName {
+	mergeRun := 1
+	for i, c := range cands {
+		if i == 0 {
 			res = append(res, c)
+			continue
 		}
-	}
-	cands = res
 
-	if merge {
-		// Merge adjacent candidates. This guarantees that the matches
-		// are non-overlapping.
-		sort.Sort((sortByOffsetSlice)(cands))
-		res = cands[:0]
-		mergeRun := 1
-		for i, c := range cands {
-			if i == 0 {
-				res = append(res, c)
-				continue
-			}
-			last := res[len(res)-1]
+		last := res[len(res)-1]
+
+		// Never compare filename and content matches
+		if last.fileName != c.fileName {
+			res = append(res, c)
+			continue
+		}
+
+		if merge {
+			// Merge adjacent candidates. This guarantees that the matches
+			// are non-overlapping.
 			lastEnd := last.byteOffset + last.byteMatchSz
 			end := c.byteOffset + c.byteMatchSz
 			if lastEnd >= c.byteOffset {
 				mergeRun++
-
 				// Average out the score across the merged candidates. Only do it if
 				// we are boosting to avoid floating point funkiness in the normal
 				// case.
@@ -629,30 +487,44 @@ func gatherMatches(mt matchTree, known map[matchTree]bool, merge bool) []*candid
 			} else {
 				mergeRun = 1
 			}
-
-			res = append(res, c)
-		}
-	} else {
-		// Remove overlapping candidates. This guarantees that the matches
-		// are non-overlapping, but also preserves expected match counts.
-		sort.Sort((sortByOffsetSlice)(cands))
-		res = cands[:0]
-		for i, c := range cands {
-			if i == 0 {
-				res = append(res, c)
-				continue
-			}
-			last := res[len(res)-1]
+		} else {
+			// Remove overlapping candidates. This guarantees that the matches
+			// are non-overlapping, but also preserves expected match counts.
 			lastEnd := last.byteOffset + last.byteMatchSz
 			if lastEnd > c.byteOffset {
 				continue
 			}
-
-			res = append(res, c)
 		}
+
+		res = append(res, c)
+	}
+	return res
+}
+
+type sortByOffsetSlice []*candidateMatch
+
+func (m sortByOffsetSlice) Len() int      { return len(m) }
+func (m sortByOffsetSlice) Swap(i, j int) { m[i], m[j] = m[j], m[i] }
+func (m sortByOffsetSlice) Less(i, j int) bool {
+	// Sort all filename matches to the start
+	if m[i].fileName != m[j].fileName {
+		return m[i].fileName
 	}
 
-	return res
+	if m[i].byteOffset == m[j].byteOffset { // tie break if same offset
+		// Prefer longer candidates if starting at same position
+		return m[i].byteMatchSz > m[j].byteMatchSz
+	}
+	return m[i].byteOffset < m[j].byteOffset
+}
+
+// setScoreWeight is a helper used by gatherMatches to set the weight based on
+// the score weight of the matchTree.
+func setScoreWeight(scoreWeight float64, cm []*candidateMatch) []*candidateMatch {
+	for _, m := range cm {
+		m.scoreWeight = scoreWeight
+	}
+	return cm
 }
 
 func (d *indexData) branchIndex(docID uint32) int {
@@ -807,7 +679,8 @@ func (d *indexData) regexpToMatchTreeRecursive(r *syntax.Regexp, minTextSize int
 	case syntax.OpLiteral:
 		s := string(r.Rune)
 		if len(s) >= minTextSize {
-			mt, err := d.newSubstringMatchTree(&query.Substring{Pattern: s, FileName: fileName, CaseSensitive: caseSensitive})
+			ignoreCase := syntax.FoldCase == (r.Flags & syntax.FoldCase)
+			mt, err := d.newSubstringMatchTree(&query.Substring{Pattern: s, FileName: fileName, CaseSensitive: !ignoreCase && caseSensitive})
 			return mt, true, !strings.Contains(s, "\n"), err
 		}
 	case syntax.OpCapture:

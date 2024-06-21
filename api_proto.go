@@ -700,7 +700,7 @@ func SearchOptionsFromProto(p *proto.SearchOptions) *SearchOptions {
 		DocumentRanksWeight:                 p.GetDocumentRanksWeight(),
 		Trace:                               p.GetTrace(),
 		DebugScore:                          p.GetDebugScore(),
-		UseKeywordScoring:                   p.GetUseKeywordScoring(),
+		UseBM25Scoring:                      p.GetUseBm25Scoring(),
 		ExcludeRepoURLsAndLineFragments:     p.GetExcludeRepoUrlsAndLineFragments(),
 		SawpHEADInBranchesWithRevParsedName: p.GetSawpHeadInBranchesWithRevParsedName(),
 	}
@@ -727,7 +727,7 @@ func (s *SearchOptions) ToProto() *proto.SearchOptions {
 		DocumentRanksWeight:                 s.DocumentRanksWeight,
 		Trace:                               s.Trace,
 		DebugScore:                          s.DebugScore,
-		UseKeywordScoring:                   s.UseKeywordScoring,
+		UseBm25Scoring:                      s.UseBM25Scoring,
 		ExcludeRepoUrlsAndLineFragments:     s.ExcludeRepoURLsAndLineFragments,
 		SawpHeadInBranchesWithRevParsedName: s.SawpHEADInBranchesWithRevParsedName,
 	}

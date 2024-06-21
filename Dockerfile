@@ -1,4 +1,4 @@
-FROM golang:1.21.4-alpine3.18 AS builder
+FROM golang:1.22.2-alpine3.19 AS builder
 
 RUN apk add --no-cache ca-certificates
 
@@ -13,10 +13,9 @@ COPY . ./
 ARG VERSION
 RUN go install -ldflags "-X github.com/xvandish/zoekt.Version=$VERSION" ./cmd/...
 
-FROM rust:alpine3.18 AS rust-builder
+FROM rust:alpine3.19 AS rust-builder
 
-RUN apk update --no-cache && apk upgrade --no-cache && \
-    apk add --no-cache git wget musl-dev>=1.1.24-r10 build-base
+RUN apk add --no-cache git wget musl-dev build-base
 
 RUN wget -qO- https://github.com/sourcegraph/sourcegraph/archive/0c8aa18eece45922a2b56dc0f94e21b1bb533e7d.tar.gz | tar xz && mv sourcegraph-* sourcegraph
 
@@ -27,10 +26,9 @@ RUN cd sourcegraph/docker-images/syntax-highlighter && /sourcegraph/cmd/symbols/
 
 RUN cargo install --path sourcegraph/docker-images/syntax-highlighter --root /syntect_server --bin scip-ctags
 
-FROM alpine:3.18 AS zoekt
+FROM alpine:3.19 AS zoekt
 
-RUN apk update --no-cache && apk upgrade --no-cache && \
-    apk add --no-cache git ca-certificates bind-tools tini jansson wget
+RUN apk add --no-cache git ca-certificates bind-tools tini jansson wget
 
 COPY install-ctags-alpine.sh .
 RUN ./install-ctags-alpine.sh && rm install-ctags-alpine.sh

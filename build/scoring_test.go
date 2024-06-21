@@ -60,7 +60,59 @@ func TestFileNameMatch(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		checkScoring(t, c, ctags.UniversalCTags)
+		checkScoring(t, c, false, ctags.UniversalCTags)
+	}
+}
+
+func TestBM25(t *testing.T) {
+	exampleJava, err := os.ReadFile("./testdata/example.java")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []scoreCase{
+		{
+			// Matches on both filename and content
+			fileName: "example.java",
+			query:    &query.Substring{Pattern: "example"},
+			content:  exampleJava,
+			language: "Java",
+			// bm25-score: 0.57 <- sum-termFrequencyScore: 10.00, length-ratio: 1.00
+			wantScore: 0.57,
+		}, {
+			// Matches only on content
+			fileName: "example.java",
+			query: &query.And{Children: []query.Q{
+				&query.Substring{Pattern: "inner"},
+				&query.Substring{Pattern: "static"},
+				&query.Substring{Pattern: "interface"},
+			}},
+			content:  exampleJava,
+			language: "Java",
+			// bm25-score: 1.75 <- sum-termFrequencyScore: 56.00, length-ratio: 1.00
+			wantScore: 1.75,
+		},
+		{
+			// Matches only on filename
+			fileName: "example.java",
+			query:    &query.Substring{Pattern: "java"},
+			content:  exampleJava,
+			language: "Java",
+			// bm25-score: 0.51 <- sum-termFrequencyScore: 5.00, length-ratio: 1.00
+			wantScore: 0.51,
+		},
+		{
+			// Matches only on filename, and content is missing
+			fileName: "a/b/c/config.go",
+			query:    &query.Substring{Pattern: "config.go"},
+			language: "Go",
+			// bm25-score: 0.60 <- sum-termFrequencyScore: 5.00, length-ratio: 0.00
+			wantScore: 0.60,
+		},
+	}
+
+	for _, c := range cases {
+		checkScoring(t, c, true, ctags.UniversalCTags)
 	}
 }
 
@@ -162,10 +214,42 @@ func TestJava(t *testing.T) {
 			// 7000 (symbol) + 900 (Java enum) + 500 (word) + 300 (atom) + 10 (file order)
 			wantScore: 8710,
 		},
+		{
+			fileName: "example.java",
+			content:  exampleJava,
+			query:    &query.Substring{Content: true, Pattern: "unInnerInterface("},
+			language: "Java",
+			// 4000 (overlap Symbol) + 700 (Java method) + 50 (partial word) + 10 (file order)
+			wantScore: 4760,
+		},
+		{
+			fileName: "example.java",
+			content:  exampleJava,
+			query:    &query.Substring{Content: true, Pattern: "InnerEnum"},
+			language: "Java",
+			// 7000 (Symbol) + 900 (Java enum) + 500 (word) + 10 (file order)
+			wantScore: 8410,
+		},
+		{
+			fileName: "example.java",
+			content:  exampleJava,
+			query:    &query.Substring{Content: true, Pattern: "enum InnerEnum"},
+			language: "Java",
+			// 5500 (edge Symbol) + 900 (Java enum) + 500 (word) + 10 (file order)
+			wantScore: 6910,
+		},
+		{
+			fileName: "example.java",
+			content:  exampleJava,
+			query:    &query.Substring{Content: true, Pattern: "public enum InnerEnum {"},
+			language: "Java",
+			// 4000 (overlap Symbol) + 900 (Java enum) + 500 (word) + 10 (file order)
+			wantScore: 5410,
+		},
 	}
 
 	for _, c := range cases {
-		checkScoring(t, c, ctags.UniversalCTags)
+		checkScoring(t, c, false, ctags.UniversalCTags)
 	}
 }
 
@@ -229,7 +313,7 @@ func TestKotlin(t *testing.T) {
 	parserType := ctags.UniversalCTags
 	for _, c := range cases {
 		t.Run(c.language, func(t *testing.T) {
-			checkScoring(t, c, parserType)
+			checkScoring(t, c, false, parserType)
 		})
 	}
 }
@@ -286,7 +370,7 @@ func TestCpp(t *testing.T) {
 	parserType := ctags.UniversalCTags
 	for _, c := range cases {
 		t.Run(c.language, func(t *testing.T) {
-			checkScoring(t, c, parserType)
+			checkScoring(t, c, false, parserType)
 		})
 	}
 }
@@ -318,7 +402,7 @@ func TestPython(t *testing.T) {
 
 	for _, parserType := range []ctags.CTagsParserType{ctags.UniversalCTags, ctags.ScipCTags} {
 		for _, c := range cases {
-			checkScoring(t, c, parserType)
+			checkScoring(t, c, false, parserType)
 		}
 	}
 
@@ -332,7 +416,7 @@ func TestPython(t *testing.T) {
 		wantScore: 7860,
 	}
 
-	checkScoring(t, scipOnlyCase, ctags.ScipCTags)
+	checkScoring(t, scipOnlyCase, false, ctags.ScipCTags)
 }
 
 func TestRuby(t *testing.T) {
@@ -370,7 +454,7 @@ func TestRuby(t *testing.T) {
 
 	for _, parserType := range []ctags.CTagsParserType{ctags.UniversalCTags, ctags.ScipCTags} {
 		for _, c := range cases {
-			checkScoring(t, c, parserType)
+			checkScoring(t, c, false, parserType)
 		}
 	}
 }
@@ -418,7 +502,7 @@ func TestScala(t *testing.T) {
 
 	parserType := ctags.UniversalCTags
 	for _, c := range cases {
-		checkScoring(t, c, parserType)
+		checkScoring(t, c, false, parserType)
 	}
 }
 
@@ -477,7 +561,7 @@ func Get() {
 
 	for _, parserType := range []ctags.CTagsParserType{ctags.UniversalCTags, ctags.ScipCTags} {
 		for _, c := range cases {
-			checkScoring(t, c, parserType)
+			checkScoring(t, c, false, parserType)
 		}
 	}
 }
@@ -500,7 +584,7 @@ func skipIfCTagsUnavailable(t *testing.T, parserType ctags.CTagsParserType) {
 	}
 }
 
-func checkScoring(t *testing.T, c scoreCase, parserType ctags.CTagsParserType) {
+func checkScoring(t *testing.T, c scoreCase, useBM25 bool, parserType ctags.CTagsParserType) {
 	skipIfCTagsUnavailable(t, parserType)
 
 	name := c.language
@@ -540,7 +624,10 @@ func checkScoring(t *testing.T, c scoreCase, parserType ctags.CTagsParserType) {
 		}
 		defer ss.Close()
 
-		srs, err := ss.Search(context.Background(), c.query, &zoekt.SearchOptions{DebugScore: true})
+		srs, err := ss.Search(context.Background(), c.query, &zoekt.SearchOptions{
+			UseBM25Scoring: useBM25,
+			ChunkMatches:   true,
+			DebugScore:     true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -550,7 +637,7 @@ func checkScoring(t *testing.T, c scoreCase, parserType ctags.CTagsParserType) {
 		}
 
 		if got := srs.Files[0].Score; math.Abs(got-c.wantScore) > epsilon {
-			t.Fatalf("score: want %f, got %f\ndebug: %s\ndebugscore: %s", c.wantScore, got, srs.Files[0].Debug, srs.Files[0].LineMatches[0].DebugScore)
+			t.Fatalf("score: want %f, got %f\ndebug: %s\ndebugscore: %s", c.wantScore, got, srs.Files[0].Debug, srs.Files[0].ChunkMatches[0].DebugScore)
 		}
 
 		if got := srs.Files[0].Language; got != c.language {

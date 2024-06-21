@@ -34,8 +34,6 @@ import (
 	"github.com/xvandish/zoekt"
 	zjson "github.com/xvandish/zoekt/json"
 	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/rpc"
-	"github.com/xvandish/zoekt/stream"
 )
 
 var Funcmap = template.FuncMap{
@@ -72,6 +70,9 @@ var Funcmap = template.FuncMap{
 			return post
 		}
 		return fmt.Sprintf("%s...(%d bytes skipped)...", post[:limit], len(post)-limit)
+	},
+	"TrimTrailingNewline": func(s string) string {
+		return strings.TrimSuffix(s, "\n")
 	},
 }
 
@@ -173,9 +174,7 @@ func NewMux(s *Server) (*http.ServeMux, error) {
 		mux.HandleFunc("/print", s.servePrint)
 	}
 	if s.RPC {
-		mux.Handle(rpc.DefaultRPCPath, rpc.Server(traceAwareSearcher{s.Searcher})) // /rpc
 		mux.Handle("/api/", http.StripPrefix("/api", zjson.JSONServer(traceAwareSearcher{s.Searcher})))
-		mux.Handle(stream.DefaultSSEPath, stream.Server(traceAwareSearcher{s.Searcher})) // /stream
 	}
 
 	mux.HandleFunc("/healthz", s.serveHealthz)

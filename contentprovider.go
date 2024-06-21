@@ -137,89 +137,115 @@ func (p *contentProvider) findOffset(filename bool, r uint32) uint32 {
 	return byteOff
 }
 
+// fillMatches converts the internal candidateMatch slice into our API's LineMatch.
+// It only ever returns content XOR filename matches, not both. If there are any
+// content matches, these are always returned, and we omit filename matches.
+//
+// Performance invariant: ms is sorted and non-overlapping.
+//
+// Note: the byte slices may be backed by mmapped data, so before being
+// returned by the API it needs to be copied.
 func (p *contentProvider) fillMatches(ms []*candidateMatch, numContextLines int, language string, debug bool) []LineMatch {
-	var result []LineMatch
-	if ms[0].fileName {
-		score, debugScore, _ := p.candidateMatchScore(ms, language, debug)
+	var filenameMatches []*candidateMatch
+	contentMatches := make([]*candidateMatch, 0, len(ms))
 
-		// There is only "line" in a filename.
-		res := LineMatch{
-			Line:     p.id.fileName(p.idx),
-			FileName: true,
-
-			Score:      score,
-			DebugScore: debugScore,
+	for _, m := range ms {
+		if m.fileName {
+			filenameMatches = append(filenameMatches, m)
+		} else {
+			contentMatches = append(contentMatches, m)
 		}
-
-		for _, m := range ms {
-			res.LineFragments = append(res.LineFragments, LineFragmentMatch{
-				LineOffset:  int(m.byteOffset),
-				MatchLength: int(m.byteMatchSz),
-				Offset:      m.byteOffset,
-			})
-
-			result = []LineMatch{res}
-		}
-	} else {
-		ms = breakMatchesOnNewlines(ms, p.data(false))
-		result = p.fillContentMatches(ms, numContextLines, language, debug)
 	}
 
-	return result
+	// If there are any content matches, we only return these and skip filename matches.
+	if len(contentMatches) > 0 {
+		contentMatches = breakMatchesOnNewlines(contentMatches, p.data(false))
+		return p.fillContentMatches(contentMatches, numContextLines, language, debug)
+	}
+
+	// Otherwise, we return a single line containing the filematch match.
+	score, debugScore, _ := p.candidateMatchScore(filenameMatches, language, debug)
+	res := LineMatch{
+		Line:       p.id.fileName(p.idx),
+		FileName:   true,
+		Score:      score,
+		DebugScore: debugScore,
+	}
+
+	for _, m := range ms {
+		res.LineFragments = append(res.LineFragments, LineFragmentMatch{
+			LineOffset:  int(m.byteOffset),
+			MatchLength: int(m.byteMatchSz),
+			Offset:      m.byteOffset,
+		})
+	}
+
+	return []LineMatch{res}
+
 }
 
-// fillChunkMatches converts the internal candidateMatch slice into our APIs ChunkMatch.
+// fillChunkMatches converts the internal candidateMatch slice into our API's ChunkMatch.
+// It only ever returns content XOR filename matches, not both. If there are any content
+// matches, these are always returned, and we omit filename matches.
 //
 // Performance invariant: ms is sorted and non-overlapping.
 //
 // Note: the byte slices may be backed by mmapped data, so before being
 // returned by the API it needs to be copied.
 func (p *contentProvider) fillChunkMatches(ms []*candidateMatch, numContextLines int, language string, debug bool) []ChunkMatch {
-	var result []ChunkMatch
-	if ms[0].fileName {
-		// If the first match is a filename match, there will only be
-		// one match and the matched content will be the filename.
+	var filenameMatches []*candidateMatch
+	contentMatches := make([]*candidateMatch, 0, len(ms))
 
-		score, debugScore, _ := p.candidateMatchScore(ms, language, debug)
-
-		fileName := p.id.fileName(p.idx)
-		ranges := make([]Range, 0, len(ms))
-		for _, m := range ms {
-			ranges = append(ranges, Range{
-				Start: Location{
-					ByteOffset: m.byteOffset,
-					LineNumber: 1,
-					Column:     uint32(utf8.RuneCount(fileName[:m.byteOffset]) + 1),
-				},
-				End: Location{
-					ByteOffset: m.byteOffset + m.byteMatchSz,
-					LineNumber: 1,
-					Column:     uint32(utf8.RuneCount(fileName[:m.byteOffset+m.byteMatchSz]) + 1),
-				},
-			})
+	for _, m := range ms {
+		if m.fileName {
+			filenameMatches = append(filenameMatches, m)
+		} else {
+			contentMatches = append(contentMatches, m)
 		}
-
-		result = []ChunkMatch{{
-			Content:      fileName,
-			ContentStart: Location{ByteOffset: 0, LineNumber: 1, Column: 1},
-			Ranges:       ranges,
-			FileName:     true,
-
-			Score:      score,
-			DebugScore: debugScore,
-		}}
-	} else {
-		result = p.fillContentChunkMatches(ms, numContextLines, language, debug)
 	}
 
-	return result
+	// If there are any content matches, we only return these and skip filename matches.
+	if len(contentMatches) > 0 {
+		return p.fillContentChunkMatches(contentMatches, numContextLines, language, debug)
+	}
+
+	// Otherwise, we return a single chunk representing the filename match.
+	score, debugScore, _ := p.candidateMatchScore(filenameMatches, language, debug)
+	fileName := p.id.fileName(p.idx)
+	ranges := make([]Range, 0, len(ms))
+	for _, m := range ms {
+		ranges = append(ranges, Range{
+			Start: Location{
+				ByteOffset: m.byteOffset,
+				LineNumber: 1,
+				Column:     uint32(utf8.RuneCount(fileName[:m.byteOffset]) + 1),
+			},
+			End: Location{
+				ByteOffset: m.byteOffset + m.byteMatchSz,
+				LineNumber: 1,
+				Column:     uint32(utf8.RuneCount(fileName[:m.byteOffset+m.byteMatchSz]) + 1),
+			},
+		})
+	}
+
+	return []ChunkMatch{{
+		Content:      fileName,
+		ContentStart: Location{ByteOffset: 0, LineNumber: 1, Column: 1},
+		Ranges:       ranges,
+		FileName:     true,
+
+		Score:      score,
+		DebugScore: debugScore,
+	}}
 }
 
 func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLines int, language string, debug bool) []LineMatch {
 	var result []LineMatch
 	for len(ms) > 0 {
 		m := ms[0]
-		num, lineStart, lineEnd := p.newlines().atOffset(m.byteOffset)
+		num := p.newlines().atOffset(m.byteOffset)
+		lineStart := int(p.newlines().lineStart(num))
+		nextLineStart := int(p.newlines().lineStart(num + 1))
 
 		var lineCands []*candidateMatch
 
@@ -227,7 +253,7 @@ func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLin
 
 		for len(ms) > 0 {
 			m := ms[0]
-			if int(m.byteOffset) <= lineEnd {
+			if int(m.byteOffset) < nextLineStart {
 				endMatch = m.byteOffset + m.byteMatchSz
 				lineCands = append(lineCands, m)
 				ms = ms[1:]
@@ -240,7 +266,7 @@ func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLin
 			log.Panicf(
 				"%s %v infinite loop: num %d start,end %d,%d, offset %d",
 				p.id.fileName(p.idx), p.id.metaData,
-				num, lineStart, lineEnd,
+				num, lineStart, nextLineStart,
 				m.byteOffset)
 		}
 
@@ -249,22 +275,22 @@ func (p *contentProvider) fillContentMatches(ms []*candidateMatch, numContextLin
 		// Due to merging matches, we may have a match that
 		// crosses a line boundary. Prevent confusion by
 		// taking lines until we pass the last match
-		for lineEnd < len(data) && endMatch > uint32(lineEnd) {
-			next := bytes.IndexByte(data[lineEnd+1:], '\n')
+		for nextLineStart < len(data) && endMatch > uint32(nextLineStart) {
+			next := bytes.IndexByte(data[nextLineStart:], '\n')
 			if next == -1 {
-				lineEnd = len(data)
+				nextLineStart = len(data)
 			} else {
 				// TODO(hanwen): test that checks "+1" part here.
-				lineEnd += next + 1
+				nextLineStart += next + 1
 			}
 		}
 
 		finalMatch := LineMatch{
 			LineStart:  lineStart,
-			LineEnd:    lineEnd,
+			LineEnd:    nextLineStart,
 			LineNumber: num,
 		}
-		finalMatch.Line = data[lineStart:lineEnd]
+		finalMatch.Line = data[lineStart:nextLineStart]
 
 		if numContextLines > 0 {
 			finalMatch.Before = p.newlines().getLines(data, num-numContextLines, num)
@@ -316,19 +342,18 @@ func (p *contentProvider) fillContentChunkMatches(ms []*candidateMatch, numConte
 		for _, cm := range chunk.candidates {
 			startOffset := cm.byteOffset
 			endOffset := cm.byteOffset + cm.byteMatchSz
-			startLine, startLineOffset, _ := newlines.atOffset(startOffset)
-			endLine, endLineOffset, _ := newlines.atOffset(endOffset)
+			startLine, endLine := newlines.offsetRangeToLineRange(startOffset, endOffset)
 
 			ranges = append(ranges, Range{
 				Start: Location{
 					ByteOffset: startOffset,
 					LineNumber: uint32(startLine),
-					Column:     columnHelper.get(startLineOffset, startOffset),
+					Column:     columnHelper.get(int(newlines.lineStart(startLine)), startOffset),
 				},
 				End: Location{
 					ByteOffset: endOffset,
 					LineNumber: uint32(endLine),
-					Column:     columnHelper.get(endLineOffset, endOffset),
+					Column:     columnHelper.get(int(newlines.lineStart(endLine)), endOffset),
 				},
 			})
 		}
@@ -337,7 +362,7 @@ func (p *contentProvider) fillContentChunkMatches(ms []*candidateMatch, numConte
 		if firstLineNumber < 1 {
 			firstLineNumber = 1
 		}
-		firstLineStart, _ := newlines.lineBounds(firstLineNumber)
+		firstLineStart := newlines.lineStart(firstLineNumber)
 
 		chunkMatches = append(chunkMatches, ChunkMatch{
 			Content: newlines.getLines(data, firstLineNumber, int(chunk.lastLine)+numContextLines+1),
@@ -375,8 +400,7 @@ func chunkCandidates(ms []*candidateMatch, newlines newlines, numContextLines in
 	for _, m := range ms {
 		startOffset := m.byteOffset
 		endOffset := m.byteOffset + m.byteMatchSz
-		firstLine, _, _ := newlines.atOffset(startOffset)
-		lastLine, _, _ := newlines.atOffset(endOffset)
+		firstLine, lastLine := newlines.offsetRangeToLineRange(startOffset, endOffset)
 
 		if len(chunks) > 0 && int(chunks[len(chunks)-1].lastLine)+numContextLines >= firstLine-numContextLines {
 			// If a new chunk created with the current candidateMatch would
@@ -447,45 +471,39 @@ type newlines struct {
 }
 
 // atOffset returns the line containing the offset. If the offset lands on
-// the newline ending line M, we return M.  The line is characterized
-// by its linenumber (base-1, byte index of line start, byte index of
-// line end). The line end is the index of a newline, or the filesize
-// (if matching the last line of the file.)
-func (nls newlines) atOffset(offset uint32) (lineNumber, lineStart, lineEnd int) {
+// the newline ending line M, we return M.
+func (nls newlines) atOffset(offset uint32) (lineNumber int) {
 	idx := sort.Search(len(nls.locs), func(n int) bool {
 		return nls.locs[n] >= offset
 	})
-
-	start, end := nls.lineBounds(idx + 1)
-	return idx + 1, int(start), int(end)
+	return idx + 1
 }
 
-// lineBounds returns the byte offsets of the start and end of the 1-based
-// lineNumber. The end offset is exclusive and will not contain the line-ending
-// newline. If the line number is out of range of the lines in the file, start
-// and end will be clamped to [0,fileSize].
-func (nls newlines) lineBounds(lineNumber int) (start, end uint32) {
+// lineStart returns the byte offset of the beginning of the given line.
+// lineNumber is 1-based. If lineNumber is out of range of the lines in the
+// file, the return value will be clamped to [0,fileSize].
+func (nls newlines) lineStart(lineNumber int) uint32 {
 	// nls.locs[0] + 1 is the start of the 2nd line of data.
 	startIdx := lineNumber - 2
-	endIdx := lineNumber - 1
 
 	if startIdx < 0 {
-		start = 0
+		return 0
 	} else if startIdx >= len(nls.locs) {
-		start = nls.fileSize
+		return nls.fileSize
 	} else {
-		start = nls.locs[startIdx] + 1
+		return nls.locs[startIdx] + 1
 	}
+}
 
-	if endIdx < 0 {
-		end = 0
-	} else if endIdx >= len(nls.locs) {
-		end = nls.fileSize
-	} else {
-		end = nls.locs[endIdx]
-	}
-
-	return start, end
+// offsetRangeToLineRange returns range of lines that fully contains the given byte range.
+// The inputs are 0-based byte offsets into the file representing the (exclusive) range [startOffset, endOffset).
+// The return values are 1-based line numbers representing the (inclusive) range [startLine, endLine].
+func (nls newlines) offsetRangeToLineRange(startOffset, endOffset uint32) (startLine, endLine int) {
+	startLine = nls.atOffset(startOffset)
+	endLine = nls.atOffset(
+		max(startOffset, max(endOffset, 1)-1), // clamp endOffset and prevent underflow
+	)
+	return startLine, endLine
 }
 
 // getLines returns a slice of data containing the lines [low, high).
@@ -495,22 +513,7 @@ func (nls newlines) getLines(data []byte, low, high int) []byte {
 		return nil
 	}
 
-	lowStart, _ := nls.lineBounds(low)
-	_, highEnd := nls.lineBounds(high - 1)
-
-	// Drop any trailing newline. Editors do not treat a trailing newline as
-	// the start of a new line, so we should not either. lineBounds clamps to
-	// len(data) when an out-of-bounds line is requested.
-	//
-	// As an example, if we request lines 1-5 from a file with contents
-	// `one\ntwo\nthree\n`, we should return `one\ntwo\nthree` because those are
-	// the three "lines" in the file, separated by newlines.
-	if highEnd == uint32(len(data)) && bytes.HasSuffix(data, []byte{'\n'}) {
-		highEnd = highEnd - 1
-		lowStart = min(lowStart, highEnd)
-	}
-
-	return data[lowStart:highEnd]
+	return data[nls.lineStart(low):nls.lineStart(high)]
 }
 
 const (
@@ -535,21 +538,49 @@ const (
 	scoreLineOrderFactor = 1.0
 )
 
-// findSection checks whether a section defined by offset and size lies within
-// one of the sections in secs.
-func findSection(secs []DocumentSection, off, sz uint32) (uint32, bool) {
-	j := sort.Search(len(secs), func(i int) bool {
-		return secs[i].End >= off+sz
-	})
+// findMaxOverlappingSection returns the index of the section in secs that
+// overlaps the most with the area defined by off and sz, relative to the size
+// of the section. If no section overlaps, it returns 0, false. If multiple
+// sections overlap the same amount, the first one is returned.
+//
+// The implementation assumes that sections do not overlap and are sorted by
+// DocumentSection.Start.
+func findMaxOverlappingSection(secs []DocumentSection, off, sz uint32) (uint32, bool) {
+	start := off
+	end := off + sz
 
-	if j == len(secs) {
+	// Find the first section that might overlap
+	j := sort.Search(len(secs), func(i int) bool { return secs[i].End > start })
+
+	if j == len(secs) || secs[j].Start >= end {
+		// No overlap.
 		return 0, false
 	}
 
-	if secs[j].Start <= off && off+sz <= secs[j].End {
-		return uint32(j), true
+	relOverlap := func(j int) float64 {
+		secSize := secs[j].End - secs[j].Start
+		if secSize == 0 {
+			return 0
+		}
+		// This cannot overflow because we make sure there is overlap before calling relOverlap
+		overlap := min(secs[j].End, end) - max(secs[j].Start, start)
+		return float64(overlap) / float64(secSize)
 	}
-	return 0, false
+
+	ol1 := relOverlap(j)
+	if epsilonEqualsOne(ol1) || j == len(secs)-1 || secs[j+1].Start >= end {
+		return uint32(j), ol1 > 0
+	}
+
+	// We know that [off,off+sz[ overlaps with at least 2 sections. We only have to check
+	// if the second section overlaps more than the first one, because a third
+	// section can only overlap if the overlap with the second section is complete.
+	ol2 := relOverlap(j + 1)
+	if ol2 > ol1 {
+		return uint32(j + 1), ol2 > 0
+	}
+
+	return uint32(j), ol1 > 0
 }
 
 func (p *contentProvider) findSymbol(cm *candidateMatch) (DocumentSection, *Symbol, bool) {
@@ -561,8 +592,8 @@ func (p *contentProvider) findSymbol(cm *candidateMatch) (DocumentSection, *Symb
 
 	secIdx, ok := cm.symbolIdx, cm.symbol
 	if !ok {
-		// Not from a symbol matchtree. Lets see if it intersects with a symbol.
-		secIdx, ok = findSection(secs, cm.byteOffset, cm.byteMatchSz)
+		// Not from a symbol matchTree. Let's see if it overlaps with a symbol.
+		secIdx, ok = findMaxOverlappingSection(secs, cm.byteOffset, cm.byteMatchSz)
 	}
 	if !ok {
 		return DocumentSection{}, nil, false
@@ -637,7 +668,7 @@ func (p *contentProvider) candidateMatchScore(ms []*candidateMatch, language str
 			} else if startMatch || endMatch {
 				addScore("EdgeSymbol", (scoreSymbol+scorePartialSymbol)/2)
 			} else {
-				addScore("InnerSymbol", scorePartialSymbol)
+				addScore("OverlapSymbol", scorePartialSymbol)
 			}
 
 			// Score based on symbol data
