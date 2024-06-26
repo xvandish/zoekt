@@ -5,18 +5,22 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/google/go-github/v27/github"
+	// "github.com/google/go-github/v27/github"
+	"github.com/bradleyfalzon/ghinstallation/v2"
+	"github.com/google/go-github/v62/github"
 	"github.com/xvandish/zoekt/gitindex"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 )
 
+// TODO: update this to use authentication for the git calls
 const iso8601Format = "2006-01-02T15:04:05Z07:00"
 
 func main() {
@@ -27,6 +31,9 @@ func main() {
 	token := flag.String("token",
 		filepath.Join(os.Getenv("HOME"), ".github-token"),
 		"file holding API token.")
+	appPK := flag.String("app-pk", "", "The filepath of a GitHub App PrivateKey. Used to create installation tokens to interact with the API")
+	appID := flag.Int64("app-id", -1, "The ID of the GithubAP")
+	appInstallID := flag.Int64("app-install-id", -1, "The installation ID of the GitHub app")
 	forks := flag.Bool("forks", true, "whether to allow forks or not. This DOES NOT mean that only forks are allowed")
 	namePattern := flag.String("name", "", "only return repos whose name matches the given regexp.")
 	excludePattern := flag.String("exclude", "", "don't return repos whose names match this regexp.")
@@ -104,12 +111,23 @@ func main() {
 		}
 	}
 
+	if *appPK != "" {
+		if *appID == -1 || *appInstallID == -1 {
+			log.Fatal("app-id and app-install-id must be set to use a github app")
+		}
+		itr, err := ghinstallation.NewKeyFromFile(http.DefaultTransport, *appID, *appInstallID, *appPK)
+		if err != nil {
+			log.Fatal(err)
+		}
+		client = github.NewClient(&http.Client{Transport: itr})
+	}
+
 	reposFilters := reposFilters{
 		topics:        topics,
 		excludeTopics: excludeTopics,
 		noArchived:    noArchived,
 	}
-	var repos []github.Repository
+	var repos []*github.Repository
 
 	if *org != "" {
 		repos, err = getReposUpdatedAfterLastUpdate(client, "org", *org, *namePattern, reposFilters, sinceTime, *parallelSearchReqs, *forks)
@@ -162,7 +180,7 @@ func hasIntersection(s1, s2 []string) bool {
 
 // fetches a specific page of github repository search results
 // TODO: how to handle a specific page failing
-func fetchPage(client *github.Client, searchQuery string, page int, results chan<- []github.Repository) error {
+func fetchPage(client *github.Client, searchQuery string, page int, results chan<- []*github.Repository) error {
 	opts := &github.SearchOptions{TextMatch: false, ListOptions: github.ListOptions{PerPage: 100, Page: page}}
 	result, _, err := client.Search.Repositories(context.Background(), searchQuery, opts)
 
@@ -176,12 +194,12 @@ func fetchPage(client *github.Client, searchQuery string, page int, results chan
 	return nil
 }
 
-func callGithubRepoSearchConcurrently(initialResp *github.Response, concurrencyLimit int, firstResult *github.RepositoriesSearchResult, gClient *github.Client, searchQuery string) ([]github.Repository, error) {
+func callGithubRepoSearchConcurrently(initialResp *github.Response, concurrencyLimit int, firstResult *github.RepositoriesSearchResult, gClient *github.Client, searchQuery string) ([]*github.Repository, error) {
 	pagesToCall := initialResp.LastPage - 1
 
-	var reposToUpdate []github.Repository
+	var reposToUpdate []*github.Repository
 	// buffered channel so we don't block without a requisite send
-	results := make(chan []github.Repository, pagesToCall)
+	results := make(chan []*github.Repository, pagesToCall)
 
 	g, _ := errgroup.WithContext(context.Background())
 	g.SetLimit(concurrencyLimit)
@@ -209,7 +227,7 @@ func callGithubRepoSearchConcurrently(initialResp *github.Response, concurrencyL
 	return reposToUpdate, nil
 }
 
-func getReposUpdatedAfterLastUpdate(client *github.Client, key string, orgOrUser string, namePattern string, reposFilters reposFilters, lastUpdate time.Time, maxParallelSearchReqs int, forksPresent bool) ([]github.Repository, error) {
+func getReposUpdatedAfterLastUpdate(client *github.Client, key string, orgOrUser string, namePattern string, reposFilters reposFilters, lastUpdate time.Time, maxParallelSearchReqs int, forksPresent bool) ([]*github.Repository, error) {
 	forkString := "true"
 	if !forksPresent {
 		forkString = "false"
