@@ -146,7 +146,7 @@ func main() {
 
 	var appInstallToken string
 	if *appPK != "" {
-		log.Println("configuring mirroring to use GitHub App\n")
+		log.Println("configuring mirroring to use GitHub App")
 		if *appID == -1 || *appInstallID == -1 {
 			log.Fatal("app-id and app-install-id must be set to use a github app")
 		}
@@ -161,7 +161,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		log.Println("set GITHUB_TOKEN with length=%d", len(appInstallToken))
+		log.Printf("set GITHUB_TOKEN with length=%d\n", len(appInstallToken))
 		os.Setenv("GITHUB_TOKEN", appInstallToken)
 		defer os.Setenv("GITHUB_TOKEN", "")
 	}
