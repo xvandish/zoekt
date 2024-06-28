@@ -106,6 +106,13 @@ jobs:
       - name: checkout
         uses: actions/checkout@v3
 
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: version
         id: version
         run: .github/workflows/docker-version.sh
@@ -115,7 +122,7 @@ jobs:
         uses: docker/metadata-action@v3
         with:
           images: |
-            sourcegraph/zoekt-webserver
+            xvandish/zoekt-webserver
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -126,7 +133,7 @@ jobs:
         uses: docker/metadata-action@v3
         with:
           images: |
-            sourcegraph/zoekt-indexserver
+            xvandish/zoekt-indexserver
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -148,9 +155,6 @@ jobs:
           tags: ${{ steps.version.outputs.value }},latest
           dockerfile: Dockerfile.webserver
           add_git_labels: "true"
-          registry: "ghcr.io"
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
           push: true
 
       - name: build-push-indexserver
@@ -160,7 +164,4 @@ jobs:
           tags: ${{ steps.version.outputs.value }},latest
           dockerfile: Dockerfile.indexserver
           add_git_labels: "true"
-          registry: "ghcr.io"
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
           push: true
