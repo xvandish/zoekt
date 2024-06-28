@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bradleyfalzon/ghinstallation"
 	"github.com/xvandish/zoekt/gitindex"
 	"golang.org/x/sync/errgroup"
 )
@@ -216,6 +218,32 @@ func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos c
 		log.Printf("no repos found under %s", repoDir)
 	} else {
 		fmt.Printf("found %d repos to fetch with %d workers\n", len(repos), opts.parallelFetches)
+	}
+
+	// use a GitHub app for authentication, if provided
+	var ghToken string
+	if opts.appPK != "" {
+		log.Printf("using GitHub APP to fetch repos\n")
+		itr, err := ghinstallation.NewKeyFromFile(http.DefaultTransport, opts.appID, opts.appInstallID, opts.appPK)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// to avoid some complexity, we generate a single token and hope that it
+		// does not expire before all fetches are done. Expiry time is 1 hour.
+		// If this begins to fail, Token() can be called before every fetch, with
+		// some protection to make sure the backing refresh of the token is not
+		// concurrently called.
+		ghToken, err = itr.Token(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		log.Printf("set GITHUB_TOKEN with length=%d\n", len(ghToken))
+		os.Setenv("GITHUB_TOKEN", ghToken)
+
+		// remove the token once we're done
+		defer os.Setenv("GITHUB_TOKEN", "")
 	}
 
 	g, _ := errgroup.WithContext(context.Background())
