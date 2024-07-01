@@ -133,17 +133,13 @@ jobs:
       - name: build-push-webserver
         uses: docker/build-push-action@v4
         with:
-          repository: xvandish/zoekt-webserver
-          tags: ${{ steps.version.outputs.value }},latest
+          outputs: "type=registry,push=true"
+          tags: ghcr.io/${{ github.repository_owner }}/zoekt-webserver:${{ steps.version.outputs.value }},latest
           dockerfile: Dockerfile.webserver
-          add_git_labels: "true"
-          push: true
 
       - name: build-push-indexserver
         uses: docker/build-push-action@v4
         with:
-          repository: xvandish/zoekt-indexserver
-          tags: ${{ steps.version.outputs.value }},latest
+          outputs: "type=registry,push=true"
+          tags: ghcr.io/${{ github.repository_owner }}/zoekt-indexserver:${{ steps.version.outputs.value }},latest
           dockerfile: Dockerfile.indexserver
-          add_git_labels: "true"
-          push: true
