@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -161,9 +162,22 @@ func main() {
 			log.Fatal(err)
 		}
 
-		log.Printf("set GITHUB_TOKEN with length=%d\n", len(appInstallToken))
-		os.Setenv("GITHUB_TOKEN", appInstallToken)
-		defer os.Setenv("GITHUB_TOKEN", "")
+		// we set this globally rather than just munging the cloneUrl later so that
+		// the clone URL (that now includes the token) is not logged anywhere
+		log.Printf("setting global git config token url replacement len=%d\n", len(appInstallToken))
+		gitUrlReplacement := fmt.Sprintf("url.https://x-access-token:%s@github.com/.insteadof", appInstallToken)
+		_, err = exec.Command("git", "config", "--global", gitUrlReplacement, "https://github.com/").Output()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		defer func() {
+			log.Printf("unsetting global git config token url replacement\n")
+			_, err := exec.Command("git", "config", "--global", "--unset", gitUrlReplacement, "https://github.com/").Output()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}()
 	}
 
 	reposFilters := reposFilters{
