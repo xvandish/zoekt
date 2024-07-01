@@ -115,35 +115,12 @@ jobs:
         uses: docker/login-action@v3.2.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: version
         id: version
         run: .github/workflows/docker-version.sh
-
-      - name: docker-meta-webserver
-        id: meta-webserver
-        uses: docker/metadata-action@v3
-        with:
-          images: |
-            xvandish/zoekt-webserver
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=sha
-      - name: docker-meta-indexserver
-        id: meta-indexserver
-        uses: docker/metadata-action@v3
-        with:
-          images: |
-            xvandish/zoekt-indexserver
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=sha
 
       - name: build-zoekt
         uses: docker/build-push-action@v4
