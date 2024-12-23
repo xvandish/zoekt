@@ -88,6 +88,8 @@ type Options struct {
 	appPK               string
 	appID               int64
 	appInstallID        int64
+	initRestoreIndexDir string
+	initRestoreGitDir   string
 }
 
 func (o *Options) validate() {
@@ -151,6 +153,8 @@ func (o *Options) defineFlags() {
 	flag.StringVar(&o.appPK, "app-pk", "", "The filepath of a GitHub App PrivateKey. Used to create installation tokens to interact with the API")
 	flag.Int64Var(&o.appID, "app-id", -1, "The ID of the GithubAP")
 	flag.Int64Var(&o.appInstallID, "app-install-id", -1, "The installation ID of the GitHub app")
+	flag.StringVar(&o.initRestoreGitDir, "restore-dir-git", "zoekt-backup/repos/", "Initialize dataDir with the data in this folder")
+	flag.StringVar(&o.initRestoreIndexDir, "restore-dir-index", "zoekt-backup/indices/", "Initialize indexDir with the data in this folder")
 }
 
 func periodicBackup(dataDir, indexDir string, opts *Options) {
@@ -350,6 +354,25 @@ func main() {
 				log.Fatal("use_smart_gh_fetch is only valid if a config ONLY contains GitHub configs")
 			}
 		}
+	}
+
+	if opts.initRestoreGitDir != "" {
+		log.Printf("starting git restore...\n")
+		gitSyncCmd := exec.Command("rsync", "-ruv", opts.initRestoreGitDir, *dataDir+"/")
+		_, errBuf := loggedRun(gitSyncCmd)
+		if errBuf != nil {
+			log.Fatalf("ERROR: error initializing git repos %v\n", err)
+		}
+		log.Printf("\tDONE\n")
+	}
+	if opts.initRestoreIndexDir != "" {
+		log.Printf("starting index restore...")
+		idxSyncCmd := exec.Command("rsync", "-ruv", opts.initRestoreIndexDir, *indexDir+"/")
+		_, errBuf := loggedRun(idxSyncCmd)
+		if errBuf != nil {
+			log.Fatalf("ERROR: error initializing index shards %v\n", err)
+		}
+		log.Printf("\tDONE\n")
 	}
 
 	pendingRepos := make(chan string, 6000)
