@@ -19,11 +19,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc64"
-	"html/template"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"text/template"
 	"time"
 	"unicode/utf8"
 
@@ -188,9 +190,6 @@ type IndexBuilder struct {
 	// docID => repoID
 	repos []uint16
 
-	// Experimental: docID => rank vec
-	ranks [][]float64
-
 	contentPostings *postingsBuilder
 	namePostings    *postingsBuilder
 
@@ -216,11 +215,41 @@ type IndexBuilder struct {
 
 func (d *Repository) verify() error {
 	for _, t := range []string{d.FileURLTemplate, d.LineFragmentTemplate, d.CommitURLTemplate} {
-		if _, err := template.New("").Parse(t); err != nil {
+		if _, err := ParseTemplate(t); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func urlJoinPath(base string, elem ...string) string {
+	// golangs html/template always escapes "+" appearing in an HTML attribute
+	// [1]. We may even want to treat more characters, differently but this
+	// atleast makes it possible to visit URLs like [2].
+	//
+	// We only do this to elem since base will normally be a hardcoded string.
+	//
+	// [1]: https://sourcegraph.com/github.com/golang/go@go1.23.2/-/blob/src/html/template/html.go?L71-80
+	// [2]: https://github.com/apple/swift-system/blob/main/Sources/System/Util+StringArray.swift
+	elem = append([]string{}, elem...) // copy to mutate
+	for i := range elem {
+		elem[i] = strings.ReplaceAll(elem[i], "+", "%2B")
+	}
+	u, err := url.JoinPath(base, elem...)
+	if err != nil {
+		return "#!error: " + err.Error()
+	}
+	return u
+}
+
+// ParseTemplate will parse the templates for FileURLTemplate,
+// LineFragmentTemplate and CommitURLTemplate.
+//
+// It makes available the extra function UrlJoinPath.
+func ParseTemplate(text string) (*template.Template, error) {
+	return template.New("").Funcs(template.FuncMap{
+		"URLJoinPath": urlJoinPath,
+	}).Parse(text)
 }
 
 // ContentSize returns the number of content bytes so far ingested.
@@ -306,15 +335,6 @@ type Document struct {
 	// Document sections for symbols. Offsets should use bytes.
 	Symbols         []DocumentSection
 	SymbolsMetaData []*Symbol
-
-	// Ranks is a vector of ranks for a document as provided by a DocumentRanksFile
-	// file in the git repo.
-	//
-	// Two documents can be ordered by comparing the components of their rank
-	// vectors. Bigger entries are better, as are longer vectors.
-	//
-	// This field is experimental and may change at any time without warning.
-	Ranks []float64
 }
 
 type symbolSlice struct {
@@ -473,10 +493,6 @@ func (b *IndexBuilder) Add(doc Document) error {
 	b.subRepos = append(b.subRepos, subRepoIdx)
 	b.repos = append(b.repos, uint16(repoIdx))
 
-	// doc.Ranks might be nil. In case we don't use offline ranking, doc.Ranks is
-	// always nil.
-	b.ranks = append(b.ranks, doc.Ranks)
-
 	hasher.Write(doc.Content)
 
 	b.contentStrings = append(b.contentStrings, docStr)
@@ -566,4 +582,14 @@ func (t *DocChecker) clearTrigrams(maxTrigramCount int) {
 	for key := range t.trigrams {
 		delete(t.trigrams, key)
 	}
+}
+
+// ShardName returns the name of the shard for the given prefix, version, and
+// shard number.
+func ShardName(indexDir string, prefix string, version, n int) string {
+	prefix = url.QueryEscape(prefix)
+	if len(prefix) > 200 {
+		prefix = prefix[:200] + hashString(prefix)[:8]
+	}
+	return filepath.Join(indexDir, fmt.Sprintf("%s_v%d.%05d.zoekt", prefix, version, n))
 }

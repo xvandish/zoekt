@@ -553,6 +553,9 @@ func (r RepositoryBranch) String() string {
 
 // Repository holds repository metadata.
 type Repository struct {
+	// Sourcegraph's tenant ID
+	TenantID int
+
 	// Sourcegraph's repository ID
 	ID uint32
 
@@ -578,7 +581,7 @@ type Repository struct {
 	//  1. the name of HEAD (via rev-parse)
 	//  2. the index of "HEAD" in Branches
 	// why do we care about the index...? I don't think we do...
-	HEADRevParsedName string
+	//HEADRevParsedName string
 
 	// Nil if this is not the super project.
 	SubRepoMap map[string]*Repository
@@ -644,7 +647,21 @@ func (r *Repository) UnmarshalJSON(data []byte) error {
 		r.ID = uint32(id)
 	}
 
-	if v, ok := repo.RawConfig["priority"]; ok {
+	if v, ok := repo.RawConfig["tenantID"]; ok {
+		id, _ := strconv.ParseInt(v, 10, 64)
+		r.TenantID = int(id)
+	}
+
+	// Sourcegraph indexserver doesn't set repo.Rank, so we set it here. Setting it
+	// on read instead of during indexing allows us to avoid a complete reindex.
+	//
+	// Prefer "latestCommitDate" over "priority" for ranking. We keep priority for
+	// backwards compatibility.
+	if _, ok := repo.RawConfig["latestCommitDate"]; ok {
+		// We use the number of months since 1970 as a simple measure of repo freshness.
+		// It is monotonically increasing and stable across re-indexes and restarts.
+		r.Rank = monthsSince1970(repo.LatestCommitDate)
+	} else if v, ok := repo.RawConfig["priority"]; ok {
 		r.priority, err = strconv.ParseFloat(v, 64)
 		if err != nil {
 			r.priority = 0
@@ -654,12 +671,26 @@ func (r *Repository) UnmarshalJSON(data []byte) error {
 		// based on priority. Setting it on read instead of during indexing
 		// allows us to avoid a complete reindex.
 		if r.Rank == 0 && r.priority > 0 {
-			// Normalize the repo score within [0, 1), with the midpoint at 5,000. This means popular
-			// repos (roughly ones with over 5,000 stars) see diminishing returns from more stars.
+			// Normalize the repo score within [0, maxUint16), with the midpoint at 5,000.
+			// This means popular repos (roughly ones with over 5,000 stars) see diminishing
+			// returns from more stars.
 			r.Rank = uint16(r.priority / (5000.0 + r.priority) * maxUInt16)
 		}
 	}
+
 	return nil
+}
+
+// monthsSince1970 returns the number of months since 1970. It returns values in
+// the range [0, maxUInt16]. The upper bound is reached in the year 7431, the
+// lower bound for all dates before 1970.
+func monthsSince1970(t time.Time) uint16 {
+	base := time.Unix(0, 0)
+	if t.Before(base) {
+		return 0
+	}
+	months := int(t.Year()-1970)*12 + int(t.Month()-1)
+	return uint16(min(months, maxUInt16))
 }
 
 // MergeMutable will merge x into r. mutated will be true if it made any
@@ -946,15 +977,6 @@ type SearchOptions struct {
 	// EXPERIMENTAL: the behavior of this flag may be changed in future versions.
 	ChunkMatches bool
 
-	// EXPERIMENTAL. If true, document ranks are used as additional input for
-	// sorting matches.
-	UseDocumentRanks bool
-
-	// EXPERIMENTAL. When UseDocumentRanks is enabled, this can be optionally set to adjust
-	// their weight in the file match score. If the value is <= 0.0, the default weight value
-	// will be used. This option is temporary and is only exposed for testing/ tuning purposes.
-	DocumentRanksWeight float64
-
 	// EXPERIMENTAL. If true, use text-search style scoring instead of the default
 	// scoring formula. The scoring algorithm treats each match in a file as a term
 	// and computes an approximation to BM25.
@@ -1032,14 +1054,9 @@ func (s *SearchOptions) String() string {
 	addDuration("MaxWallTime", s.MaxWallTime)
 	addDuration("FlushWallTime", s.FlushWallTime)
 
-	if s.DocumentRanksWeight > 0 {
-		add("DocumentRanksWeight", strconv.FormatFloat(s.DocumentRanksWeight, 'g', -1, 64))
-	}
-
 	addBool("EstimateDocCount", s.EstimateDocCount)
 	addBool("Whole", s.Whole)
 	addBool("ChunkMatches", s.ChunkMatches)
-	addBool("UseDocumentRanks", s.UseDocumentRanks)
 	addBool("UseBM25Scoring", s.UseBM25Scoring)
 	addBool("Trace", s.Trace)
 	addBool("DebugScore", s.DebugScore)

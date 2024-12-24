@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sourcegraph/zoekt/gitindex"
 	gitlab "github.com/xanzy/go-gitlab"
@@ -46,8 +47,10 @@ func main() {
 	isMember := flag.Bool("membership", false, "only mirror repos this user is a member of ")
 	isPublic := flag.Bool("public", false, "only mirror public repos")
 	deleteRepos := flag.Bool("delete", false, "delete missing repos")
+	excludeUserRepos := flag.Bool("exclude_user", false, "exclude user repos")
 	namePattern := flag.String("name", "", "only clone repos whose name matches the given regexp.")
 	excludePattern := flag.String("exclude", "", "don't mirror repos whose names match this regexp.")
+	lastActivityAfter := flag.String("last_activity_after", "", "only mirror repos that have been active since this date (format: 2006-01-02).")
 	flag.Parse()
 
 	if *dest == "" {
@@ -89,6 +92,14 @@ func main() {
 		opt.Visibility = gitlab.Visibility(gitlab.PublicVisibility)
 	}
 
+	if *lastActivityAfter != "" {
+		targetDate, err := time.Parse("2006-01-02", *lastActivityAfter)
+		if err != nil {
+			log.Fatal(err)
+		}
+		opt.LastActivityAfter = gitlab.Time(targetDate)
+	}
+
 	var gitlabProjects []*gitlab.Project
 	for {
 		projects, _, err := client.Projects.ListProjects(opt)
@@ -101,6 +112,9 @@ func main() {
 			// Skip projects without a default branch - these should be projects
 			// where the repository isn't enabled
 			if project.DefaultBranch == "" {
+				continue
+			}
+			if *excludeUserRepos && project.Namespace.Kind == "user" {
 				continue
 			}
 
@@ -128,7 +142,6 @@ func main() {
 		}
 		gitlabProjects = trimmed
 	}
-
 	fetchProjects(destDir, apiToken, gitlabProjects)
 
 	if *deleteRepos {
@@ -178,7 +191,7 @@ func fetchProjects(destDir, token string, projects []*gitlab.Project) {
 
 			"zoekt.archived": marshalBool(p.Archived),
 			"zoekt.fork":     marshalBool(p.ForkedFromProject != nil),
-			"zoekt.public":   marshalBool(p.Public),
+			"zoekt.public":   marshalBool(p.Visibility == gitlab.PublicVisibility),
 		}
 
 		cloneURL := p.HTTPURLToRepo

@@ -117,6 +117,8 @@ func versionFromPath(path string) (string, int) {
 }
 
 func (s *DirectoryWatcher) scan() error {
+	// NOTE: if you change which file extensions are read, please update the
+	// watch implementation.
 	fs, err := filepath.Glob(filepath.Join(s.dir, "*.zoekt"))
 	if err != nil {
 		return err
@@ -177,7 +179,7 @@ func (s *DirectoryWatcher) scan() error {
 	}
 
 	if len(toDrop) > 0 {
-		log.Printf("unloading %d shard(s): %s", len(toDrop), humanTruncateList(toDrop, 5))
+		log.Printf("[INFO] unloading %d shard(s): %s", len(toDrop), humanTruncateList(toDrop, 5))
 	}
 
 	s.loader.drop(toDrop...)
@@ -216,21 +218,38 @@ func (s *DirectoryWatcher) watch() error {
 	signal := make(chan struct{}, 1)
 
 	go func() {
+		notify := func() {
+			select {
+			case signal <- struct{}{}:
+			default:
+			}
+		}
+
+		ticker := time.NewTicker(time.Minute)
+
 		for {
 			select {
-			case <-watcher.Events:
-				select {
-				case signal <- struct{}{}:
-				default:
+			case event := <-watcher.Events:
+				// Only notify if a file we read in has changed. This is important to
+				// avoid all the events writing to temporary files.
+				if strings.HasSuffix(event.Name, ".zoekt") || strings.HasSuffix(event.Name, ".meta") {
+					notify()
 				}
+
+			case <-ticker.C:
+				// Periodically just double check the disk
+				notify()
+
 			case err := <-watcher.Errors:
 				// Ignore ErrEventOverflow since we rely on the presence of events so
 				// safe to ignore.
 				if err != nil && err != fsnotify.ErrEventOverflow {
-					log.Println("watcher error:", err)
+					log.Println("[ERROR] watcher error:", err)
 				}
+
 			case <-s.quit:
 				watcher.Close()
+				ticker.Stop()
 				close(signal)
 				return
 			}
@@ -241,7 +260,7 @@ func (s *DirectoryWatcher) watch() error {
 		defer close(s.stopped)
 		for range signal {
 			if err := s.scan(); err != nil {
-				log.Println("watcher error:", err)
+				log.Println("[ERROR] watcher error:", err)
 			}
 		}
 	}()

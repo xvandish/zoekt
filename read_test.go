@@ -28,10 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"testing/quick"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/sourcegraph/zoekt/query"
 )
@@ -372,10 +370,10 @@ func TestBackwardsCompat(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		outname := fmt.Sprintf("testdata/backcompat/new_v%d.%05d.zoekt", IndexFormatVersion, 0)
-		t.Log("writing new file", outname)
+		outName := ShardName("testdata/backcompat", "new", IndexFormatVersion, 0)
+		t.Log("writing new file", outName)
 
-		err = os.WriteFile(outname, buf.Bytes(), 0o644)
+		err = os.WriteFile(outName, buf.Bytes(), 0o644)
 		if err != nil {
 			t.Fatalf("Creating output file: %v", err)
 		}
@@ -439,31 +437,31 @@ func TestBackfillIDIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestEncodeRanks(t *testing.T) {
-	quick.Check(func(ranks [][]float64) bool {
-		buf := bytes.Buffer{}
-		w := &writer{w: &buf}
+func BenchmarkReadMetadata(b *testing.B) {
+	file, err := os.Open("testdata/benchmark/zoekt_v16.00000.zoekt")
+	if err != nil {
+		b.Fatalf("Failed to open test file: %v", err)
+	}
+	defer file.Close()
 
-		if err := encodeRanks(w, ranks); err != nil {
-			return false
+	indexFile, err := NewIndexFile(file)
+	if err != nil {
+		b.Fatalf("could not open index: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		repos, metadata, err := ReadMetadata(indexFile)
+		if err != nil {
+			b.Fatalf("ReadMetadata failed: %v", err)
 		}
-
-		// In case all rank vectors are empty, IE {{}, {}, ...}, we won't write anything
-		// to w and gob decode will decode this as "nil", which will fail the
-		// comparison even with cmpopts.EquateEmpty().
-		if w.off == 0 {
-			return true
+		if len(repos) != 1 {
+			b.Fatalf("expected 1 repository")
 		}
-
-		d := &indexData{}
-		if err := decodeRanks(buf.Bytes(), &d.ranks); err != nil {
-			t.Fatal(err)
+		if metadata == nil {
+			b.Fatalf("expected non-nil metadata")
 		}
-
-		if d := cmp.Diff(ranks, d.ranks, cmpopts.EquateEmpty()); d != "" {
-			t.Fatalf("-want, +got:\n%s\n", d)
-		}
-
-		return true
-	}, nil)
+	}
 }

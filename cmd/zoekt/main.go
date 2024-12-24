@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"strings"
 	"time"
 
 	"github.com/felixge/fgprof"
@@ -43,7 +45,8 @@ func displayMatches(files []zoekt.FileMatch, pat string, withRepo bool, list boo
 		}
 
 		for _, m := range f.LineMatches {
-			fmt.Printf("%s%s:%d:%s%s\n", r, f.FileName, m.LineNumber, m.Line, addTabIfNonEmpty(f.Debug))
+			l := bytes.TrimSuffix(m.Line, []byte{'\n'})
+			fmt.Printf("%s%s:%d:%s%s\n", r, f.FileName, m.LineNumber, l, addTabIfNonEmpty(f.Debug))
 		}
 	}
 }
@@ -164,7 +167,7 @@ func main() {
 	flag.Usage = func() {
 		name := os.Args[0]
 		fmt.Fprintf(os.Stderr, "Usage:\n\n  %s [option] QUERY\n"+
-			"for example\n\n  %s 'byte file:java -file:test'\n\n", name, name)
+			"for example\n\n  %s byte file:java -file:test\n\n", name, name)
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n")
 	}
@@ -175,7 +178,11 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	pat := flag.Arg(0)
+	pat := strings.Join(flag.Args(), " ")
+
+	if !*verbose {
+		log.SetOutput(io.Discard)
+	}
 
 	var searcher zoekt.Searcher
 	var err error

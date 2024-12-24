@@ -41,10 +41,6 @@ import (
 
 	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	"github.com/sourcegraph/mountinfo"
-	zoektgrpc "github.com/sourcegraph/zoekt/cmd/zoekt-webserver/grpc/server"
-	"github.com/sourcegraph/zoekt/grpc/internalerrs"
-	"github.com/sourcegraph/zoekt/grpc/messagesize"
-	proto "github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -52,8 +48,14 @@ import (
 
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/build"
+	zoektgrpc "github.com/sourcegraph/zoekt/cmd/zoekt-webserver/grpc/server"
 	"github.com/sourcegraph/zoekt/debugserver"
+	"github.com/sourcegraph/zoekt/grpc/internalerrs"
+	"github.com/sourcegraph/zoekt/grpc/messagesize"
+	"github.com/sourcegraph/zoekt/grpc/propagator"
+	proto "github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
 	"github.com/sourcegraph/zoekt/internal/profiler"
+	"github.com/sourcegraph/zoekt/internal/tenant"
 	"github.com/sourcegraph/zoekt/internal/tracer"
 	"github.com/sourcegraph/zoekt/query"
 	"github.com/sourcegraph/zoekt/shards"
@@ -177,7 +179,7 @@ func main() {
 	liblog := sglog.Init(resource)
 	defer liblog.Sync()
 	tracer.Init(resource)
-	profiler.Init("zoekt-webserver", zoekt.Version, -1)
+	profiler.Init("zoekt-webserver")
 
 	if *logDir != "" {
 		if fi, err := os.Lstat(*logDir); err != nil || !fi.IsDir() {
@@ -639,16 +641,20 @@ func traceContext(ctx context.Context) sglog.TraceContext {
 }
 
 func newGRPCServer(logger sglog.Logger, streamer zoekt.Streamer, additionalOpts ...grpc.ServerOption) *grpc.Server {
-	metrics := mustGetServerMetrics()
+	metrics := serverMetricsOnce()
 
 	opts := []grpc.ServerOption{
 		grpc.ChainStreamInterceptor(
+			propagator.StreamServerPropagator(tenant.Propagator{}),
+			tenant.StreamServerInterceptor,
 			otelgrpc.StreamServerInterceptor(),
 			metrics.StreamServerInterceptor(),
 			messagesize.StreamServerInterceptor,
 			internalerrs.LoggingStreamServerInterceptor(logger),
 		),
 		grpc.ChainUnaryInterceptor(
+			propagator.UnaryServerPropagator(tenant.Propagator{}),
+			tenant.UnaryServerInterceptor,
 			otelgrpc.UnaryServerInterceptor(),
 			metrics.UnaryServerInterceptor(),
 			messagesize.UnaryServerInterceptor,
@@ -689,24 +695,17 @@ var (
 		Help: "The total number of search requests that zoekt received",
 	})
 
-	serverMetricsOnce sync.Once
-	serverMetrics     *grpcprom.ServerMetrics
-)
-
-// mustGetServerMetrics returns a singleton instance of the server metrics
-// that are shared across all gRPC servers that this process creates.
-//
-// This function panics if the metrics cannot be registered with the default
-// Prometheus registry.
-func mustGetServerMetrics() *grpcprom.ServerMetrics {
-	serverMetricsOnce.Do(func() {
-		serverMetrics = grpcprom.NewServerMetrics(
+	// serviceMetricsOnce returns a singleton instance of the server metrics
+	// that are shared across all gRPC servers that this process creates.
+	//
+	// This function panics if the metrics cannot be registered with the default
+	// Prometheus registry.
+	serverMetricsOnce = sync.OnceValue(func() *grpcprom.ServerMetrics {
+		serverMetrics := grpcprom.NewServerMetrics(
 			grpcprom.WithServerCounterOptions(),
 			grpcprom.WithServerHandlingTimeHistogram(), // record the overall response latency for a gRPC request)
 		)
-
 		prometheus.DefaultRegisterer.MustRegister(serverMetrics)
+		return serverMetrics
 	})
-
-	return serverMetrics
-}
+)

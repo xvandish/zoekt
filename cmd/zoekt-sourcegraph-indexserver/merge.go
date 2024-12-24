@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,7 +58,7 @@ func (s *Server) merge(mergeCmd func(args ...string) *exec.Cmd) {
 	// Guard against the user triggering competing merge jobs with the debug
 	// command.
 	if !mergeRunning.CompareAndSwap(false, true) {
-		log.Printf("merge already running")
+		infoLog.Printf("merge already running")
 		return
 	}
 	defer mergeRunning.Store(false)
@@ -73,14 +73,14 @@ func (s *Server) merge(mergeCmd func(args ...string) *exec.Cmd) {
 		next = false
 		s.muIndexDir.Global(func() {
 			candidates, excluded := loadCandidates(s.IndexDir, s.mergeOpts)
-			log.Printf("loadCandidates: candidates=%d excluded=%d", len(candidates), excluded)
+			infoLog.Printf("loadCandidates: candidates=%d excluded=%d", len(candidates), excluded)
 
 			c := pickCandidates(candidates, s.mergeOpts.targetSizeBytes)
 			if len(c.shards) <= 1 {
-				log.Printf("could not find enough shards to build a compound shard")
+				infoLog.Printf("could not find enough shards to build a compound shard")
 				return
 			}
-			log.Printf("start merging: shards=%d total_size=%.2fMiB", len(c.shards), float64(c.size)/(1024*1024))
+			infoLog.Printf("start merging: shards=%d total_size=%.2fMiB", len(c.shards), float64(c.size)/(1024*1024))
 
 			var paths []string
 			for _, p := range c.shards {
@@ -88,13 +88,25 @@ func (s *Server) merge(mergeCmd func(args ...string) *exec.Cmd) {
 			}
 
 			start := time.Now()
-			out, err := mergeCmd(paths...).CombinedOutput()
 
-			metricShardMergingDuration.WithLabelValues(strconv.FormatBool(err != nil)).Observe(time.Since(start).Seconds())
+			cmd := mergeCmd(paths...)
+
+			// zoekt-merge-index writes the full path of the new compound shard to stdout.
+			stdoutBuf := &bytes.Buffer{}
+			stderrBuf := &bytes.Buffer{}
+			cmd.Stdout = stdoutBuf
+			cmd.Stderr = stderrBuf
+
+			err := cmd.Run()
+
+			durationSeconds := time.Since(start).Seconds()
+			metricShardMergingDuration.WithLabelValues(strconv.FormatBool(err != nil)).Observe(durationSeconds)
 			if err != nil {
-				log.Printf("mergeCmd: out=%s, err=%s", out, err)
+				errorLog.Printf("error merging shards: stdout=%s, stderr=%s, durationSeconds=%.2f err=%s", stdoutBuf.String(), stderrBuf.String(), durationSeconds, err)
 				return
 			}
+
+			infoLog.Printf("finished merging: shard=%s durationSeconds=%.2f", stdoutBuf.String(), durationSeconds)
 
 			next = true
 		})
@@ -114,7 +126,7 @@ func loadCandidates(dir string, opts mergeOpts) ([]candidate, int) {
 
 	d, err := os.Open(dir)
 	if err != nil {
-		debug.Printf("failed to load candidates: %s", dir)
+		debugLog.Printf("failed to load candidates: %s", dir)
 		return []candidate{}, excluded
 	}
 	defer d.Close()
@@ -126,7 +138,7 @@ func loadCandidates(dir string, opts mergeOpts) ([]candidate, int) {
 
 		fi, err := os.Stat(path)
 		if err != nil {
-			debug.Printf("stat failed for %s: %s", n, err)
+			debugLog.Printf("stat failed for %s: %s", n, err)
 			continue
 		}
 
@@ -180,9 +192,6 @@ type mergeOpts struct {
 	// merging. For example, a value of 7 means that only repos that have been
 	// inactive for 7 days will be considered for merging.
 	minAgeDays int
-
-	// the MAX priority a shard can have to be considered for merging.
-	maxPriority float64
 }
 
 // isExcluded returns true if a shard should not be merged, false otherwise.
@@ -196,7 +205,7 @@ func isExcluded(path string, fi os.FileInfo, opts mergeOpts) bool {
 
 	repos, _, err := zoekt.ReadMetadataPath(path)
 	if err != nil {
-		debug.Printf("failed to load metadata for %s\n", fi.Name())
+		debugLog.Printf("failed to load metadata for %s\n", fi.Name())
 		return true
 	}
 
@@ -210,10 +219,6 @@ func isExcluded(path string, fi os.FileInfo, opts mergeOpts) bool {
 	}
 
 	if repos[0].LatestCommitDate.After(time.Now().AddDate(0, 0, -opts.minAgeDays)) {
-		return true
-	}
-
-	if priority, err := strconv.ParseFloat(repos[0].RawConfig["priority"], 64); err == nil && priority > opts.maxPriority {
 		return true
 	}
 

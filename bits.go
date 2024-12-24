@@ -152,6 +152,7 @@ func splitNGrams(str []byte) []runeNgramOff {
 			index: len(result),
 		})
 	}
+
 	return result
 }
 

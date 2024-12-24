@@ -26,6 +26,7 @@ import (
 	enry_data "github.com/go-enry/go-enry/v2/data"
 	"github.com/grafana/regexp"
 
+	"github.com/sourcegraph/zoekt/internal/tenant"
 	"github.com/sourcegraph/zoekt/query"
 )
 
@@ -75,6 +76,8 @@ func (d *indexData) simplify(in query.Q) query.Q {
 			return d.simplifyMultiRepo(q, func(repo *Repository) bool {
 				return r.Set[repo.Name]
 			})
+		case query.RawConfig:
+			return d.simplifyMultiRepo(q, func(repo *Repository) bool { return uint8(r)&encodeRawConfig(repo.RawConfig) == uint8(r) })
 		case *query.RepoIDs:
 			return d.simplifyMultiRepo(q, func(repo *Repository) bool {
 				return r.Repos.Contains(repo.ID)
@@ -226,6 +229,12 @@ nextFileMatch:
 				continue
 			}
 
+			// 🚨 SECURITY: Skip documents that don't belong to the tenant. This check is
+			// necessary to prevent leaking data across tenants.
+			if !tenant.HasAccess(ctx, repoMetadata.TenantID) {
+				continue
+			}
+
 			// Skip documents that are tombstoned
 			if len(repoMetadata.FileTombstones) > 0 {
 				if _, tombstoned := repoMetadata.FileTombstones[string(d.fileName(nextDoc))]; tombstoned {
@@ -330,7 +339,7 @@ nextFileMatch:
 			// document frequencies. Since we don't store document frequencies in the index,
 			// we have to defer the calculation of the final BM25 score to after the whole
 			// shard has been processed.
-			tf = calculateTermFrequency(finalCands, df)
+			tf = cp.calculateTermFrequency(finalCands, df)
 		} else {
 			// Use the standard, non-experimental scoring method by default
 			d.scoreFile(&fileMatch, nextDoc, mt, known, opts)
@@ -385,11 +394,6 @@ nextFileMatch:
 
 	// Update stats based on work done during document search.
 	updateMatchTreeStats(mt, &res.Stats)
-
-	// If document ranking is enabled, then we can rank and truncate the files to save memory.
-	if opts.UseDocumentRanks {
-		res.Files = SortAndTruncateFiles(res.Files, opts)
-	}
 
 	res.Stats.MatchTreeSearch = timer.Elapsed()
 
@@ -573,7 +577,7 @@ func (d *indexData) gatherBranches(docID uint32, mt matchTree, known map[matchTr
 			// TODO: find a nice way to only make this check once.
 			// Can we depend on the default branch always being first
 			if swapHEAD && uid == headBranchID {
-				branchName = d.repoMetaData[repoIdx].HEADRevParsedName
+				// branchName = d.repoMetaData[repoIdx].HEADRevParsedName
 			}
 
 			branches = append(branches, branchName)
@@ -630,6 +634,11 @@ func (d *indexData) List(ctx context.Context, q query.Q, opts *ListOptions) (rl 
 
 	for i := range d.repoListEntry {
 		if d.repoMetaData[i].Tombstone {
+			continue
+		}
+		// 🚨 SECURITY: Skip documents that don't belong to the tenant. This check is
+		// necessary to prevent leaking data across tenants.
+		if !tenant.HasAccess(ctx, d.repoMetaData[i].TenantID) {
 			continue
 		}
 		rle := &d.repoListEntry[i]

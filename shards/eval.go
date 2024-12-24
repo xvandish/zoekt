@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/internal/tenant"
 	"github.com/sourcegraph/zoekt/query"
 	"github.com/sourcegraph/zoekt/trace"
 )
@@ -19,6 +20,9 @@ func (s *typeRepoSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.Se
 	tr, ctx := trace.New(ctx, "typeRepoSearcher.Search", "")
 	tr.LazyLog(q, true)
 	tr.LazyPrintf("opts: %+v", opts)
+	if tenant.EnforceTenant() {
+		tenant.Log(ctx, tr)
+	}
 	defer func() {
 		if sr != nil {
 			tr.LazyPrintf("num files: %d", len(sr.Files))
@@ -31,7 +35,7 @@ func (s *typeRepoSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.Se
 		tr.Finish()
 	}()
 
-	q, err = s.eval(ctx, q)
+	q, err = s.eval(ctx, tr, q)
 	if err != nil {
 		return nil, err
 	}
@@ -43,6 +47,9 @@ func (s *typeRepoSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zo
 	tr, ctx := trace.New(ctx, "typeRepoSearcher.StreamSearch", "")
 	tr.LazyLog(q, true)
 	tr.LazyPrintf("opts: %+v", opts)
+	if tenant.EnforceTenant() {
+		tenant.Log(ctx, tr)
+	}
 	var stats zoekt.Stats
 	defer func() {
 		tr.LazyPrintf("stats: %+v", stats)
@@ -53,7 +60,7 @@ func (s *typeRepoSearcher) StreamSearch(ctx context.Context, q query.Q, opts *zo
 		tr.Finish()
 	}()
 
-	q, err = s.eval(ctx, q)
+	q, err = s.eval(ctx, tr, q)
 	if err != nil {
 		return err
 	}
@@ -68,12 +75,12 @@ func (s *typeRepoSearcher) List(ctx context.Context, q query.Q, opts *zoekt.List
 	tr, ctx := trace.New(ctx, "typeRepoSearcher.List", "")
 	tr.LazyLog(q, true)
 	tr.LazyPrintf("opts: %s", opts)
+	if tenant.EnforceTenant() {
+		tenant.Log(ctx, tr)
+	}
 	defer func() {
 		if rl != nil {
-			tr.LazyPrintf("repos size: %d", len(rl.Repos))
-			tr.LazyPrintf("reposmap size: %d", len(rl.ReposMap))
-			tr.LazyPrintf("crashes: %d", rl.Crashes)
-			tr.LazyPrintf("stats: %+v", rl.Stats)
+			tr.LazyPrintf("repos.size=%d reposmap.size=%d crashes=%d stats=%+v", len(rl.Repos), len(rl.ReposMap), rl.Crashes, rl.Stats)
 		}
 		if err != nil {
 			tr.LazyPrintf("error: %v", err)
@@ -82,7 +89,7 @@ func (s *typeRepoSearcher) List(ctx context.Context, q query.Q, opts *zoekt.List
 		tr.Finish()
 	}()
 
-	q, err = s.eval(ctx, q)
+	q, err = s.eval(ctx, tr, q)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +97,7 @@ func (s *typeRepoSearcher) List(ctx context.Context, q query.Q, opts *zoekt.List
 	return s.Streamer.List(ctx, q, opts)
 }
 
-func (s *typeRepoSearcher) eval(ctx context.Context, q query.Q) (query.Q, error) {
+func (s *typeRepoSearcher) eval(ctx context.Context, tr *trace.Trace, q query.Q) (query.Q, error) {
 	var err error
 	q = query.Map(q, func(q query.Q) query.Q {
 		if err != nil {
@@ -102,6 +109,8 @@ func (s *typeRepoSearcher) eval(ctx context.Context, q query.Q) (query.Q, error)
 			return q
 		}
 
+		tr.LazyPrintf("evaluating sub-expression %s", rq)
+
 		var rl *zoekt.RepoList
 		rl, err = s.Streamer.List(ctx, rq.Child, nil)
 		if err != nil {
@@ -112,6 +121,9 @@ func (s *typeRepoSearcher) eval(ctx context.Context, q query.Q) (query.Q, error)
 		for _, r := range rl.Repos {
 			rs.Set[r.Repository.Name] = true
 		}
+
+		tr.LazyPrintf("replaced sub-expression with %s", rs)
+
 		return rs
 	})
 	return q, err

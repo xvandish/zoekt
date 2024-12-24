@@ -21,7 +21,10 @@ import (
 	"strings"
 )
 
-const maxUInt16 = 0xffff
+const (
+	maxUInt16   = 0xffff
+	ScoreOffset = 10_000_000
+)
 
 // addScore increments the score of the FileMatch by the computed score. If
 // debugScore is true, it also adds a debug string to the FileMatch. If raw is
@@ -81,55 +84,30 @@ func (d *indexData) scoreFile(fileMatch *FileMatch, doc uint32, mt matchTree, kn
 	// the matches.
 	addScore("fragment", maxFileScore)
 
-	if opts.UseDocumentRanks && len(d.ranks) > int(doc) {
-		weight := scoreFileRankFactor
-		if opts.DocumentRanksWeight > 0.0 {
-			weight = opts.DocumentRanksWeight
-		}
-
-		ranks := d.ranks[doc]
-		// The ranks slice always contains one entry representing the file rank (unless it's empty since the
-		// file doesn't have a rank). This is left over from when documents could have multiple rank signals,
-		// and we plan to clean this up.
-		if len(ranks) > 0 {
-			// The file rank represents a log (base 2) count. The log ranks should be bounded at 32, but we
-			// cap it just in case to ensure it falls in the range [0, 1].
-			normalized := math.Min(1.0, ranks[0]/32.0)
-			addScore("file-rank", weight*normalized)
-		}
-	}
+	// Add tiebreakers
+	//
+	// ScoreOffset shifts the score 7 digits to the left.
+	fileMatch.Score = math.Trunc(fileMatch.Score) * ScoreOffset
 
 	md := d.repoMetaData[d.repos[doc]]
+
+	// md.Rank lies in the range [0, 65535]. Hence, we have to allocate 5 digits for
+	// the rank. The scoreRepoRankFactor shifts the rank score 2 digits to the left,
+	// reserving digits 3-7 for the repo rank.
+	addScore("repo-rank", scoreRepoRankFactor*float64(md.Rank))
+
+	// digits 1-2 and the decimals are reserved for the doc order. Doc order
+	// (without the scaling factor) lies in the range [0, 1]. The upper bound is
+	// achieved for matches in the first document of a shard.
 	addScore("doc-order", scoreFileOrderFactor*(1.0-float64(doc)/float64(len(d.boundaries))))
-	addScore("repo-rank", scoreRepoRankFactor*float64(md.Rank)/maxUInt16)
 
 	if opts.DebugScore {
-		fileMatch.Debug = fmt.Sprintf("score: %.2f <- %s", fileMatch.Score, strings.TrimSuffix(fileMatch.Debug, ", "))
+		// To make the debug output easier to read, we split the score into the query
+		// dependent score and the tiebreaker
+		score := math.Trunc(fileMatch.Score / ScoreOffset)
+		tiebreaker := fileMatch.Score - score*ScoreOffset
+		fileMatch.Debug = fmt.Sprintf("score: %d (%.2f) <- %s", int(score), tiebreaker, strings.TrimSuffix(fileMatch.Debug, ", "))
 	}
-}
-
-// calculateTermFrequency computes the term frequency for the file match.
-//
-// Filename matches count more than content matches. This mimics a common text
-// search strategy where you 'boost' matches on document titles.
-func calculateTermFrequency(cands []*candidateMatch, df termDocumentFrequency) map[string]int {
-	// Treat each candidate match as a term and compute the frequencies. For now, ignore case
-	// sensitivity and treat filenames and symbols the same as content.
-	termFreqs := map[string]int{}
-	for _, cand := range cands {
-		term := string(cand.substrLowered)
-		if cand.fileName {
-			termFreqs[term] += 5
-		} else {
-			termFreqs[term]++
-		}
-	}
-
-	for term := range termFreqs {
-		df[term] += 1
-	}
-
-	return termFreqs
 }
 
 // idf computes the inverse document frequency for a term. nq is the number of

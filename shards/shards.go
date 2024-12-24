@@ -35,6 +35,7 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/internal/tenant/systemtenant"
 	"github.com/sourcegraph/zoekt/query"
 	"github.com/sourcegraph/zoekt/trace"
 )
@@ -180,6 +181,8 @@ type rankedShard struct {
 	// We have out of band ranking on compound shards which can change even if
 	// the shard file does not. So we compute a rank in getShards. We store
 	// repos here to avoid the cost of List in the search request path.
+	//
+	// repos is nil only if that call failed.
 	repos []*zoekt.Repository
 }
 
@@ -300,13 +303,13 @@ func (tl *loader) load(keys ...string) {
 		tl.ss.replace(chunk)
 	}
 
-	log.Printf("loading %d shard(s): %s", len(keys), humanTruncateList(keys, 5))
+	log.Printf("[INFO] loading %d shard(s): %s", len(keys), humanTruncateList(keys, 5))
 
 	lastProgress := time.Now()
 	for i, key := range keys {
 		// If taking a while to start-up occasionally give a progress message
 		if time.Since(lastProgress) > 5*time.Second {
-			log.Printf("still need to load %d shards...", len(keys)-i)
+			log.Printf("[INFO] still need to load %d shards...", len(keys)-i)
 			lastProgress = time.Now()
 
 			publishLoaded()
@@ -322,7 +325,7 @@ func (tl *loader) load(keys ...string) {
 			shard, err := loadShard(key)
 			if err != nil {
 				metricShardsLoadFailedTotal.Inc()
-				log.Printf("reloading: %s, err %v ", key, err)
+				log.Printf("[ERROR] reloading: %s, err %v ", key, err)
 				return
 			}
 			metricShardsLoadedTotal.Inc()
@@ -447,7 +450,13 @@ func doSelectRepoSet(shards []*rankedShard, and *query.And) ([]*rankedShard, que
 		filteredAll := true
 
 		for _, s := range shards {
-			if any, all := hasRepos(s.repos); any {
+			if s.repos == nil {
+				// repos is nil if we failed to List the shard. This shouldn't
+				// happen, but if it does we don't know what is in it and must search
+				// it without simplifying the query.
+				filtered = append(filtered, s)
+				filteredAll = false
+			} else if any, all := hasRepos(s.repos); any {
 				filtered = append(filtered, s)
 				filteredAll = filteredAll && all
 			}
@@ -505,7 +514,17 @@ func doSelectRepoSet(shards []*rankedShard, and *query.And) ([]*rankedShard, que
 
 func (ss *shardedSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.SearchOptions) (sr *zoekt.SearchResult, err error) {
 	tr, ctx := trace.New(ctx, "shardedSearcher.Search", "")
+	tr.LazyLog(q, true)
+	tr.LazyPrintf("opts: %+v", opts)
 	defer func() {
+		if sr != nil {
+			tr.LazyPrintf("num files: %d", len(sr.Files))
+			tr.LazyPrintf("stats: %+v", sr.Stats)
+		}
+		if err != nil {
+			tr.LazyPrintf("error: %v", err)
+			tr.SetError(err)
+		}
 		tr.Finish()
 	}()
 	ctx, cancel := context.WithCancel(ctx)
@@ -877,7 +896,7 @@ func searchOneShard(ctx context.Context, s zoekt.Searcher, q query.Q, opts *zoek
 	defer func() {
 		metricSearchShardRunning.Dec()
 		if e := recover(); e != nil {
-			log.Printf("crashed shard: %s: %#v, %s", s, e, debug.Stack())
+			log.Printf("[ERROR] crashed shard: %s: %#v, %s", s, e, debug.Stack())
 
 			if sr == nil {
 				sr = &zoekt.SearchResult{}
@@ -899,7 +918,7 @@ func listOneShard(ctx context.Context, s zoekt.Searcher, q query.Q, opts *zoekt.
 	defer func() {
 		metricListShardRunning.Dec()
 		if r := recover(); r != nil {
-			log.Printf("crashed shard: %s: %s, %s", s.String(), r, debug.Stack())
+			log.Printf("[ERROR] crashed shard: %s: %s, %s", s.String(), r, debug.Stack())
 			sink <- shardListResult{
 				&zoekt.RepoList{Crashes: 1}, nil,
 			}
@@ -916,7 +935,7 @@ func (ss *shardedSearcher) List(ctx context.Context, q query.Q, opts *zoekt.List
 	defer func() {
 		metricListRunning.Dec()
 		if rl != nil {
-			tr.LazyPrintf("repos.size=%d reposmap.size=%d crashes=%d", len(rl.Repos), len(rl.ReposMap), rl.Crashes)
+			tr.LazyPrintf("repos.size=%d reposmap.size=%d crashes=%d stats=%+v", len(rl.Repos), len(rl.ReposMap), rl.Crashes, rl.Stats)
 		}
 		if err != nil {
 			tr.LazyPrintf("error: %v", err)
@@ -1064,11 +1083,12 @@ func (s *shardedSearcher) getLoaded() loaded {
 
 func mkRankedShard(s zoekt.Searcher) *rankedShard {
 	q := query.Const{Value: true}
-	result, err := s.List(context.Background(), &q, nil)
+	// We need to use WithUnsafeContext here, otherwise we cannot return a proper
+	// rankedShard. On the user request path we use selectRepoSet which relies on
+	// rankedShard.repos being set.
+	result, err := s.List(systemtenant.WithUnsafeContext(context.Background()), &q, nil)
 	if err != nil {
-		return &rankedShard{Searcher: s}
-	}
-	if len(result.Repos) == 0 {
+		log.Printf("[ERROR] mkRankedShard(%s): failed to cache repository list: %v", s, err)
 		return &rankedShard{Searcher: s}
 	}
 

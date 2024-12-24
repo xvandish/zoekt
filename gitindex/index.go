@@ -17,8 +17,8 @@ package gitindex
 
 import (
 	"bytes"
+	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,8 +31,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/go-git/go-billy/v5/osfs"
+	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/build"
 	"github.com/sourcegraph/zoekt/ignore"
@@ -43,32 +45,6 @@ import (
 
 	git "github.com/go-git/go-git/v5"
 )
-
-// RepoModTime returns the time of last fetch of a git repository.
-func RepoModTime(dir string) (time.Time, error) {
-	var last time.Time
-	refDir := filepath.Join(dir, "refs")
-	if _, err := os.Lstat(refDir); err == nil {
-		if err := filepath.Walk(refDir,
-			func(_ string, fi os.FileInfo, _ error) error {
-				if !fi.IsDir() && last.Before(fi.ModTime()) {
-					last = fi.ModTime()
-				}
-				return nil
-			}); err != nil {
-			return last, err
-		}
-	}
-
-	// git gc compresses refs into the following file:
-	for _, fn := range []string{"info/refs", "packed-refs"} {
-		if fi, err := os.Lstat(filepath.Join(dir, fn)); err == nil && !fi.IsDir() && last.Before(fi.ModTime()) {
-			last = fi.ModTime()
-		}
-	}
-
-	return last, nil
-}
 
 // FindGitRepos finds directories holding git repositories below the
 // given directory. It will find both bare and the ".git" dirs in
@@ -117,22 +93,38 @@ func setTemplates(repo *zoekt.Repository, u *url.URL, typ string) error {
 		u.User = nil
 	}
 
+	// helper to generate u.JoinPath as a template
+	varVersion := ".Version"
+	varPath := ".Path"
+	urlJoinPath := func(elem ...string) string {
+		elem = append([]string{u.String()}, elem...)
+		var parts []string
+		for _, e := range elem {
+			if e == varVersion || e == varPath {
+				parts = append(parts, e)
+			} else {
+				parts = append(parts, strconv.Quote(e))
+			}
+		}
+		return fmt.Sprintf("{{URLJoinPath %s}}", strings.Join(parts, " "))
+	}
+
 	repo.URL = u.String()
 	switch typ {
 	case "gitiles":
 		// eg. https://gerrit.googlesource.com/gitiles/+/master/tools/run_dev.sh#20
-		repo.CommitURLTemplate = u.String() + "/+/{{.Version}}"
-		repo.FileURLTemplate = u.String() + "/+/{{.Version}}/{{.Path}}"
+		repo.CommitURLTemplate = urlJoinPath("+", varVersion)
+		repo.FileURLTemplate = urlJoinPath("+", varVersion, varPath)
 		repo.LineFragmentTemplate = "#{{.LineNumber}}"
 	case "github":
 		// eg. https://github.com/hanwen/go-fuse/blob/notify/genversion.sh#L10
-		repo.CommitURLTemplate = u.String() + "/commit/{{.Version}}"
-		repo.FileURLTemplate = u.String() + "/blob/{{.Version}}/{{.Path}}"
+		repo.CommitURLTemplate = urlJoinPath("commit", varVersion)
+		repo.FileURLTemplate = urlJoinPath("blob", varVersion, varPath)
 		repo.LineFragmentTemplate = "#L{{.LineNumber}}"
 	case "cgit":
 		// http://git.savannah.gnu.org/cgit/lilypond.git/tree/elisp/lilypond-mode.el?h=dev/philh&id=b2ca0fefe3018477aaca23b6f672c7199ba5238e#n100
-		repo.CommitURLTemplate = u.String() + "/commit/?id={{.Version}}"
-		repo.FileURLTemplate = u.String() + "/tree/{{.Path}}/?id={{.Version}}"
+		repo.CommitURLTemplate = urlJoinPath("commit") + "/?id={{.Version}}"
+		repo.FileURLTemplate = urlJoinPath("tree", varPath) + "/?id={{.Version}}"
 		repo.LineFragmentTemplate = "#n{{.LineNumber}}"
 	case "gitweb":
 		// https://gerrit.libreoffice.org/gitweb?p=online.git;a=blob;f=Makefile.am;h=cfcfd7c36fbae10e269653dc57a9b68c92d4c10b;hb=848145503bf7b98ce4a4aa0a858a0d71dd0dbb26#l10
@@ -142,29 +134,29 @@ func setTemplates(repo *zoekt.Repository, u *url.URL, typ string) error {
 	case "source.bazel.build":
 		// https://source.bazel.build/bazel/+/57bc201346e61c62a921c1cbf32ad24f185c10c9
 		// https://source.bazel.build/bazel/+/57bc201346e61c62a921c1cbf32ad24f185c10c9:tools/cpp/BUILD.empty;l=10
-		repo.CommitURLTemplate = u.String() + "/+/{{.Version}}"
-		repo.FileURLTemplate = u.String() + "/+/{{.Version}}:{{.Path}}"
+		repo.CommitURLTemplate = u.String() + "/%2B/{{.Version}}"
+		repo.FileURLTemplate = u.String() + "/%2B/{{.Version}}:{{.Path}}"
 		repo.LineFragmentTemplate = ";l={{.LineNumber}}"
 	case "bitbucket-server":
 		// https://<bitbucketserver-host>/projects/<project>/repos/<repo>/commits/5be7ca73b898bf17a08e607918accfdeafe1e0bc
 		// https://<bitbucketserver-host>/projects/<project>/repos/<repo>/browse/<file>?at=5be7ca73b898bf17a08e607918accfdeafe1e0bc
-		repo.CommitURLTemplate = u.String() + "/commits/{{.Version}}"
-		repo.FileURLTemplate = u.String() + "/{{.Path}}?at={{.Version}}"
+		repo.CommitURLTemplate = urlJoinPath("commits", varVersion)
+		repo.FileURLTemplate = urlJoinPath(varPath) + "?at={{.Version}}"
 		repo.LineFragmentTemplate = "#{{.LineNumber}}"
 	case "gitlab":
 		// https://gitlab.com/gitlab-org/omnibus-gitlab/-/commit/b152c864303dae0e55377a1e2c53c9592380ffed
 		// https://gitlab.com/gitlab-org/omnibus-gitlab/-/blob/aad04155b3f6fc50ede88aedaee7fc624d481149/files/gitlab-config-template/gitlab.rb.template
-		repo.CommitURLTemplate = u.String() + "/-/commit/{{.Version}}"
-		repo.FileURLTemplate = u.String() + "/-/blob/{{.Version}}/{{.Path}}"
+		repo.CommitURLTemplate = urlJoinPath("-/commit", varVersion)
+		repo.FileURLTemplate = urlJoinPath("-/blob", varVersion, varPath)
 		repo.LineFragmentTemplate = "#L{{.LineNumber}}"
 	case "gitea":
-		repo.CommitURLTemplate = u.String() + "/commit/{{.Version}}"
+		repo.CommitURLTemplate = urlJoinPath("commit", varVersion)
 		// NOTE The `display=source` query parameter is required to disable file rendering.
 		// Since line numbers are disabled in rendered files, you wouldn't be able to jump to
 		// a line without `display=source`. This is supported since gitea 1.17.0.
 		// When /src/{{.Version}} is used it will redirect to /src/commit/{{.Version}},
 		// but the query  parameters are obmitted.
-		repo.FileURLTemplate = u.String() + "/src/commit/{{.Version}}/{{.Path}}?display=source"
+		repo.FileURLTemplate = urlJoinPath("src/commit", varVersion, varPath) + "?display=source"
 		repo.LineFragmentTemplate = "#L{{.LineNumber}}"
 	default:
 		return fmt.Errorf("URL scheme type %q unknown", typ)
@@ -445,21 +437,35 @@ func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 	}
 
 	opts.BuildOptions.RepositoryDescription.Source = opts.RepoDir
-	repo, err := git.PlainOpen(opts.RepoDir)
-	if err != nil {
-		return false, fmt.Errorf("git.PlainOpen: %w", err)
+
+	var repo *git.Repository
+	// TODO: this now defaults to on since we found a bug in it. Once we have
+	// fixed openRepo default to false.
+	legacyRepoOpen := cmp.Or(os.Getenv("ZOEKT_DISABLE_GOGIT_OPTIMIZATION"), "true")
+	if b, err := strconv.ParseBool(legacyRepoOpen); b || err != nil {
+		repo, err = git.PlainOpen(opts.RepoDir)
+		if err != nil {
+			return false, fmt.Errorf("git.PlainOpen: %w", err)
+		}
+	} else {
+		var repoCloser io.Closer
+		repo, repoCloser, err = openRepo(opts.RepoDir)
+		if err != nil {
+			return false, fmt.Errorf("openRepo: %w", err)
+		}
+		defer repoCloser.Close()
 	}
 
 	if err := setTemplatesFromConfig(&opts.BuildOptions.RepositoryDescription, opts.RepoDir); err != nil {
 		log.Printf("setTemplatesFromConfig(%s): %s", opts.RepoDir, err)
 	}
 
-	branches, revParsedHEAD, err := expandBranches(repo, opts.Branches, opts.BranchPrefix, opts.DoRevParseHead)
+	branches, _, err := expandBranches(repo, opts.Branches, opts.BranchPrefix, opts.DoRevParseHead)
 	if err != nil {
 		return false, fmt.Errorf("expandBranches: %w", err)
 	}
 	// harmless to set this even if !opts.DoRevParseHead, since it will just be an empty string
-	opts.BuildOptions.RepositoryDescription.HEADRevParsedName = revParsedHEAD
+	// opts.BuildOptions.RepositoryDescription.HEADRevParsedName = revParsedHEAD
 
 	for _, b := range branches {
 		commit, err := getCommit(repo, opts.BranchPrefix, b)
@@ -488,9 +494,6 @@ func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 	// branch => (path, sha1) => repo.
 	var repos map[fileKey]BlobLocation
 
-	// fileKey => branches
-	var branchMap map[fileKey][]string
-
 	// Branch => Repo => SHA1
 	var branchVersions map[string]map[string]plumbing.Hash
 
@@ -501,7 +504,7 @@ func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 	var changedOrRemovedFiles []string
 
 	if opts.BuildOptions.IsDelta {
-		repos, branchMap, branchVersions, changedOrRemovedFiles, err = prepareDeltaBuild(opts, repo)
+		repos, branchVersions, changedOrRemovedFiles, err = prepareDeltaBuild(opts, repo)
 		if err != nil {
 			log.Printf("delta build: falling back to normal build since delta build failed, repository=%q, err=%s", opts.BuildOptions.RepositoryDescription.Name, err)
 			opts.BuildOptions.IsDelta = false
@@ -509,24 +512,24 @@ func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 	}
 
 	if !opts.BuildOptions.IsDelta {
-		repos, branchMap, branchVersions, err = prepareNormalBuild(opts, repo, branches)
+		repos, branchVersions, err = prepareNormalBuild(opts, repo)
 		if err != nil {
 			return false, fmt.Errorf("preparing normal build: %w", err)
 		}
 	}
 
 	reposByPath := map[string]BlobLocation{}
-	for key, location := range repos {
-		reposByPath[key.SubRepoPath] = location
+	for key, info := range repos {
+		reposByPath[key.SubRepoPath] = info
 	}
 
 	opts.BuildOptions.SubRepositories = map[string]*zoekt.Repository{}
-	for path, location := range reposByPath {
+	for path, info := range reposByPath {
 		tpl := opts.BuildOptions.RepositoryDescription
 		if path != "" {
-			tpl = zoekt.Repository{URL: location.URL.String()}
-			if err := SetTemplatesFromOrigin(&tpl, location.URL); err != nil {
-				log.Printf("setTemplatesFromOrigin(%s, %s): %s", path, location.URL, err)
+			tpl = zoekt.Repository{URL: info.URL.String()}
+			if err := SetTemplatesFromOrigin(&tpl, info.URL); err != nil {
+				log.Printf("setTemplatesFromOrigin(%s, %s): %s", path, info.URL, err)
 			}
 		}
 		opts.BuildOptions.SubRepositories[path] = &tpl
@@ -547,30 +550,8 @@ func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 		return false, fmt.Errorf("build.NewBuilder: %w", err)
 	}
 
-	var ranks repoPathRanks
-	var meanRank float64
-	if opts.BuildOptions.DocumentRanksPath != "" {
-		data, err := os.ReadFile(opts.BuildOptions.DocumentRanksPath)
-		if err != nil {
-			return false, err
-		}
-
-		err = json.Unmarshal(data, &ranks)
-		if err != nil {
-			return false, err
-		}
-
-		// Compute the mean rank for this repository. Note: we overwrite the rank
-		// mean that's stored in the document ranks file, since that currently
-		// represents a global mean rank across repos, which is not what we want.
-		numRanks := len(ranks.Paths)
-		if numRanks > 0 {
-			for _, rank := range ranks.Paths {
-				meanRank += rank
-			}
-			ranks.MeanRank = meanRank / float64(numRanks)
-		}
-	}
+	// Preparing the build can consume substantial memory, so check usage before starting to index.
+	builder.CheckMemoryUsage()
 
 	// we don't need to check error, since we either already have an error, or
 	// we returning the first call to builder.Finish.
@@ -595,11 +576,11 @@ func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 	names = uniq(names)
 
 	log.Printf("attempting to index %d total files", totalFiles)
-	for _, name := range names {
+	for idx, name := range names {
 		keys := fileKeys[name]
 
 		for _, key := range keys {
-			doc, err := createDocument(key, repos, branchMap, ranks, opts.BuildOptions)
+			doc, err := createDocument(key, repos, opts.BuildOptions)
 			if err != nil {
 				return false, err
 			}
@@ -607,10 +588,48 @@ func indexGitRepo(opts Options, config gitIndexConfig) (bool, error) {
 			if err := builder.Add(doc); err != nil {
 				return false, fmt.Errorf("error adding document with name %s: %w", key.FullPath(), err)
 			}
+
+			if idx%10_000 == 0 {
+				builder.CheckMemoryUsage()
+			}
+		}
+	}
+	return true, builder.Finish()
+}
+
+// openRepo opens a git repository in a way that's optimized for indexing.
+//
+// It copies the relevant logic from git.PlainOpen, and tweaks certain filesystem options.
+func openRepo(repoDir string) (*git.Repository, io.Closer, error) {
+	fs := osfs.New(repoDir)
+
+	// Check if the root directory exists.
+	if _, err := fs.Stat(""); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, git.ErrRepositoryNotExists
+		}
+		return nil, nil, err
+	}
+
+	// If there's a .git directory, use that as the new root.
+	if fi, err := fs.Stat(git.GitDirName); err == nil && fi.IsDir() {
+		if fs, err = fs.Chroot(git.GitDirName); err != nil {
+			return nil, nil, fmt.Errorf("fs.Chroot: %w", err)
 		}
 	}
 
-	return true, builder.Finish()
+	s := filesystem.NewStorageWithOptions(fs, cache.NewObjectLRUDefault(), filesystem.Options{
+		// Cache the packfile handles, preventing the packfile from being opened then closed on every object access
+		KeepDescriptors: true,
+		// Disable caching for most objects, by setting the threshold to 1 byte. This avoids allocating a bunch of
+		// in-memory objects that are unlikely to be reused, since we only read each file once. Note: go-git still
+		// proactively caches objects under 16KB (see smallObjectThreshold in packfile logic).
+		LargeObjectThreshold: 1,
+	})
+
+	// Because we're keeping descriptors open, we need to close the storage object when we're done.
+	repo, err := git.Open(s, fs)
+	return repo, s, err
 }
 
 type repoPathRanks struct {
@@ -622,10 +641,10 @@ type repoPathRanks struct {
 //   - If we have a concrete rank for this file, always use it
 //   - If there's no rank, and it's a low priority file like a test, then use rank 0
 //   - Otherwise use the mean rank of this repository, to avoid giving it a big disadvantage
-func (r repoPathRanks) rank(path string) float64 {
+func (r repoPathRanks) rank(path string, content []byte) float64 {
 	if rank, ok := r.Paths[path]; ok {
 		return rank
-	} else if build.IsLowPriority(path) {
+	} else if build.IsLowPriority(path, content) {
 		return 0.0
 	} else {
 		return r.MeanRank
@@ -649,11 +668,11 @@ func newIgnoreMatcher(tree *object.Tree) (*ignore.Matcher, error) {
 
 // prepareDeltaBuildFunc is a function that calculates the necessary metadata for preparing
 // a build.Builder instance for generating a delta build.
-type prepareDeltaBuildFunc func(options Options, repository *git.Repository) (repos map[fileKey]BlobLocation, branchMap map[fileKey][]string, branchVersions map[string]map[string]plumbing.Hash, changedOrDeletedPaths []string, err error)
+type prepareDeltaBuildFunc func(options Options, repository *git.Repository) (repos map[fileKey]BlobLocation, branchVersions map[string]map[string]plumbing.Hash, changedOrDeletedPaths []string, err error)
 
 // prepareNormalBuildFunc is a function that calculates the necessary metadata for preparing
 // a build.Builder instance for generating a normal build.
-type prepareNormalBuildFunc func(options Options, repository *git.Repository, brancges []string) (repos map[fileKey]BlobLocation, branchMap map[fileKey][]string, branchVersions map[string]map[string]plumbing.Hash, err error)
+type prepareNormalBuildFunc func(options Options, repository *git.Repository) (repos map[fileKey]BlobLocation, branchVersions map[string]map[string]plumbing.Hash, err error)
 
 type gitIndexConfig struct {
 	// prepareDeltaBuild, if not nil, is the function that is used to calculate the metadata that will be used to
@@ -669,19 +688,19 @@ type gitIndexConfig struct {
 	prepareNormalBuild prepareNormalBuildFunc
 }
 
-func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[fileKey]BlobLocation, branchMap map[fileKey][]string, branchVersions map[string]map[string]plumbing.Hash, changedOrDeletedPaths []string, err error) {
+func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[fileKey]BlobLocation, branchVersions map[string]map[string]plumbing.Hash, changedOrDeletedPaths []string, err error) {
 	if options.Submodules {
-		return nil, nil, nil, nil, fmt.Errorf("delta builds currently don't support submodule indexing")
+		return nil, nil, nil, fmt.Errorf("delta builds currently don't support submodule indexing")
 	}
 
 	// discover what commits we indexed during our last build
 	existingRepository, _, ok, err := options.BuildOptions.FindRepositoryMetadata()
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to get repository metadata: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get repository metadata: %w", err)
 	}
 
 	if !ok {
-		return nil, nil, nil, nil, fmt.Errorf("no existing shards found for repository")
+		return nil, nil, nil, fmt.Errorf("no existing shards found for repository")
 	}
 
 	if options.DeltaShardNumberFallbackThreshold > 0 {
@@ -695,7 +714,7 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 
 		oldShards := options.BuildOptions.FindAllShards()
 		if uint64(len(oldShards)) > options.DeltaShardNumberFallbackThreshold {
-			return nil, nil, nil, nil, fmt.Errorf("number of existing shards (%d) > requested shard threshold (%d)", len(oldShards), options.DeltaShardNumberFallbackThreshold)
+			return nil, nil, nil, fmt.Errorf("number of existing shards (%d) > requested shard threshold (%d)", len(oldShards), options.DeltaShardNumberFallbackThreshold)
 		}
 	}
 
@@ -717,20 +736,17 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 		existingBranchList := strings.Join(existingBranchNames, ", ")
 		optionsBranchList := strings.Join(optionsBranchNames, ", ")
 
-		return nil, nil, nil, nil, fmt.Errorf("requested branch set in build options (%q) != branch set found on disk (%q) - branch set must be the same for delta shards", optionsBranchList, existingBranchList)
+		return nil, nil, nil, fmt.Errorf("requested branch set in build options (%q) != branch set found on disk (%q) - branch set must be the same for delta shards", optionsBranchList, existingBranchList)
 	}
 
 	// Check if the build options hash does not match the repository metadata's hash
 	// If it does not match then one or more index options has changed and will require a normal build instead of a delta build
 	if options.BuildOptions.GetHash() != existingRepository.IndexOptions {
-		return nil, nil, nil, nil, fmt.Errorf("one or more index options previously stored for repository %s (ID: %d) does not match the index options for this requested build; These index option updates are incompatible with delta build. new index options: %+v", existingRepository.Name, existingRepository.ID, options.BuildOptions.HashOptions())
+		return nil, nil, nil, fmt.Errorf("one or more index options previously stored for repository %s (ID: %d) does not match the index options for this requested build; These index option updates are incompatible with delta build. new index options: %+v", existingRepository.Name, existingRepository.ID, options.BuildOptions.HashOptions())
 	}
 
 	// branch => (path, sha1) => repo.
 	repos = map[fileKey]BlobLocation{}
-
-	// fileKey => branches
-	branchMap = map[fileKey][]string{}
 
 	// branch name -> git worktree at most current commit
 	branchToCurrentTree := make(map[string]*object.Tree, len(options.Branches))
@@ -738,12 +754,12 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 	for _, b := range options.Branches {
 		commit, err := getCommit(repository, options.BranchPrefix, b)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("getting last current commit for branch %q: %w", b, err)
+			return nil, nil, nil, fmt.Errorf("getting last current commit for branch %q: %w", b, err)
 		}
 
 		tree, err := commit.Tree()
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("getting current git tree for branch %q: %w", b, err)
+			return nil, nil, nil, fmt.Errorf("getting current git tree for branch %q: %w", b, err)
 		}
 
 		branchToCurrentTree[b] = tree
@@ -752,39 +768,33 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 	rawURL := options.BuildOptions.RepositoryDescription.URL
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("parsing repository URL %q: %w", rawURL, err)
+		return nil, nil, nil, fmt.Errorf("parsing repository URL %q: %w", rawURL, err)
 	}
 
 	// TODO: Support repository submodules for delta builds
-	// For this prototype, we are ignoring repository submodules, which means that we can use the same
-	// blob location for all files
-	hackSharedBlobLocation := BlobLocation{
-		Repo: repository,
-		URL:  u,
-	}
 
 	// loop over all branches, calculate the diff between our
 	// last indexed commit and the current commit, and add files mentioned in the diff
 	for _, branch := range existingRepository.Branches {
 		lastIndexedCommit, err := getCommit(repository, "", branch.Version)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("getting last indexed commit for branch %q: %w", branch.Name, err)
+			return nil, nil, nil, fmt.Errorf("getting last indexed commit for branch %q: %w", branch.Name, err)
 		}
 
 		lastIndexedTree, err := lastIndexedCommit.Tree()
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("getting lasted indexed git tree for branch %q: %w", branch.Name, err)
+			return nil, nil, nil, fmt.Errorf("getting lasted indexed git tree for branch %q: %w", branch.Name, err)
 		}
 
 		changes, err := object.DiffTreeWithOptions(context.Background(), lastIndexedTree, branchToCurrentTree[branch.Name], &object.DiffTreeOptions{DetectRenames: false})
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("generating changeset for branch %q: %w", branch.Name, err)
+			return nil, nil, nil, fmt.Errorf("generating changeset for branch %q: %w", branch.Name, err)
 		}
 
 		for i, c := range changes {
 			oldFile, newFile, err := c.Files()
 			if err != nil {
-				return nil, nil, nil, nil, fmt.Errorf("change #%d: getting files before and after change: %w", i, err)
+				return nil, nil, nil, fmt.Errorf("change #%d: getting files before and after change: %w", i, err)
 			}
 
 			if newFile != nil {
@@ -794,13 +804,21 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 
 				// TODO@ggilmore: HACK - remove once ignore files are supported in delta builds
 				if newFileRelativeRootPath == ignore.IgnoreFile {
-					return nil, nil, nil, nil, fmt.Errorf("%q file is not yet supported in delta builds", ignore.IgnoreFile)
+					return nil, nil, nil, fmt.Errorf("%q file is not yet supported in delta builds", ignore.IgnoreFile)
 				}
 
 				// either file is added or renamed, so we need to add the new version to the build
 				file := fileKey{Path: newFileRelativeRootPath, ID: newFile.Hash}
-				repos[file] = hackSharedBlobLocation
-				branchMap[file] = append(branchMap[file], branch.Name)
+				if existing, ok := repos[file]; ok {
+					existing.Branches = append(existing.Branches, branch.Name)
+					repos[file] = existing
+				} else {
+					repos[file] = BlobLocation{
+						GitRepo:  repository,
+						URL:      u,
+						Branches: []string{branch.Name},
+					}
+				}
 			}
 
 			if oldFile == nil {
@@ -813,7 +831,7 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 			oldFileRelativeRootPath := c.From.Name
 
 			if oldFileRelativeRootPath == ignore.IgnoreFile {
-				return nil, nil, nil, nil, fmt.Errorf("%q file is not yet supported in delta builds", ignore.IgnoreFile)
+				return nil, nil, nil, fmt.Errorf("%q file is not yet supported in delta builds", ignore.IgnoreFile)
 			}
 
 			// The file is either modified or deleted. So, we need to add ALL versions
@@ -826,12 +844,20 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 						continue
 					}
 
-					return nil, nil, nil, nil, fmt.Errorf("getting hash for file %q in branch %q: %w", oldFile.Name, b, err)
+					return nil, nil, nil, fmt.Errorf("getting hash for file %q in branch %q: %w", oldFile.Name, b, err)
 				}
 
 				file := fileKey{Path: oldFileRelativeRootPath, ID: f.ID()}
-				repos[file] = hackSharedBlobLocation
-				branchMap[file] = append(branchMap[file], b)
+				if existing, ok := repos[file]; ok {
+					existing.Branches = append(existing.Branches, b)
+					repos[file] = existing
+				} else {
+					repos[file] = BlobLocation{
+						GitRepo:  repository,
+						URL:      u,
+						Branches: []string{b},
+					}
+				}
 			}
 
 			changedOrDeletedPaths = append(changedOrDeletedPaths, oldFileRelativeRootPath)
@@ -840,36 +866,34 @@ func prepareDeltaBuild(options Options, repository *git.Repository) (repos map[f
 
 	// we need to de-duplicate the branch map before returning it - it's possible for the same
 	// branch to have been added multiple times if a file has been modified across multiple commits
-
-	for file, branches := range branchMap {
-		sort.Strings(branches)
-		branchMap[file] = uniq(branches)
+	for _, info := range repos {
+		sort.Strings(info.Branches)
+		info.Branches = uniq(info.Branches)
 	}
 
 	// we also need to de-duplicate the list of changed or deleted file paths, it's also possible to have duplicates
 	// for the same reasoning as above
-
 	sort.Strings(changedOrDeletedPaths)
 	changedOrDeletedPaths = uniq(changedOrDeletedPaths)
 
-	return repos, branchMap, nil, changedOrDeletedPaths, nil
+	return repos, nil, changedOrDeletedPaths, nil
 }
 
-func prepareNormalBuild(options Options, repository *git.Repository, branches []string) (repos map[fileKey]BlobLocation, branchMap map[fileKey][]string, branchVersions map[string]map[string]plumbing.Hash, err error) {
+func prepareNormalBuild(options Options, repository *git.Repository) (repos map[fileKey]BlobLocation, branchVersions map[string]map[string]plumbing.Hash, err error) {
 	var repoCache *RepoCache
 	if options.Submodules {
 		repoCache = NewRepoCache(options.RepoCacheDir)
 	}
 
-	// branch => (path, sha1) => repo.
-	repos = map[fileKey]BlobLocation{}
-
-	// fileKey => branches
-	branchMap = map[fileKey][]string{}
-
 	// Branch => Repo => SHA1
 	branchVersions = map[string]map[string]plumbing.Hash{}
 
+	branches, _, err := expandBranches(repository, options.Branches, options.BranchPrefix, options.DoRevParseHead)
+	if err != nil {
+		return nil, nil, fmt.Errorf("expandBranches: %w", err)
+	}
+
+	rw := NewRepoWalker(repository, options.BuildOptions.RepositoryDescription.URL, repoCache)
 	for _, b := range branches {
 		commit, err := getCommit(repository, options.BranchPrefix, b)
 		if err != nil {
@@ -877,56 +901,50 @@ func prepareNormalBuild(options Options, repository *git.Repository, branches []
 				continue
 			}
 
-			return nil, nil, nil, fmt.Errorf("getCommit: %w", err)
+			return nil, nil, fmt.Errorf("getCommit: %w", err)
 		}
 
 		tree, err := commit.Tree()
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("commit.Tree: %w", err)
+			return nil, nil, fmt.Errorf("commit.Tree: %w", err)
 		}
 
 		ig, err := newIgnoreMatcher(tree)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("newIgnoreMatcher: %w", err)
+			return nil, nil, fmt.Errorf("newIgnoreMatcher: %w", err)
 		}
 
-		files, subVersions, err := TreeToFiles(repository, tree, options.BuildOptions.RepositoryDescription.URL, repoCache)
+		subVersions, err := rw.CollectFiles(tree, b, ig)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("TreeToFiles: %w", err)
-		}
-		for k, v := range files {
-			if ig.Match(k.Path) {
-				continue
-			}
-			repos[k] = v
-			branchMap[k] = append(branchMap[k], b)
+			return nil, nil, fmt.Errorf("CollectFiles: %w", err)
 		}
 
 		branchVersions[b] = subVersions
 	}
 
-	return repos, branchMap, branchVersions, nil
+	return rw.Files, branchVersions, nil
 }
 
 func createDocument(key fileKey,
 	repos map[fileKey]BlobLocation,
-	branchMap map[fileKey][]string,
-	ranks repoPathRanks,
 	opts build.Options,
 ) (zoekt.Document, error) {
-	blob, err := repos[key].Repo.BlobObject(key.ID)
+	repo := repos[key]
+	blob, err := repo.GitRepo.BlobObject(key.ID)
+	branches := repos[key].Branches
+
+	// We filter out large documents when fetching the repo. So if an object is too large, it will not be found.
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		return skippedLargeDoc(key, branches, opts), nil
+	}
+
 	if err != nil {
 		return zoekt.Document{}, err
 	}
 
 	keyFullPath := key.FullPath()
 	if blob.Size > int64(opts.SizeMax) && !opts.IgnoreSizeMax(keyFullPath) {
-		return zoekt.Document{
-			SkipReason:        fmt.Sprintf("file size %d exceeds maximum size %d", blob.Size, opts.SizeMax),
-			Name:              key.FullPath(),
-			Branches:          branchMap[key],
-			SubRepositoryPath: key.SubRepoPath,
-		}, nil
+		return skippedLargeDoc(key, branches, opts), nil
 	}
 
 	contents, err := blobContents(blob)
@@ -934,20 +952,21 @@ func createDocument(key fileKey,
 		return zoekt.Document{}, err
 	}
 
-	var pathRanks []float64
-	if len(ranks.Paths) > 0 {
-		// If the repository has ranking data, then store the file's rank.
-		pathRank := ranks.rank(keyFullPath)
-		pathRanks = []float64{pathRank}
-	}
-
 	return zoekt.Document{
 		SubRepositoryPath: key.SubRepoPath,
 		Name:              keyFullPath,
 		Content:           contents,
-		Branches:          branchMap[key],
-		Ranks:             pathRanks,
+		Branches:          branches,
 	}, nil
+}
+
+func skippedLargeDoc(key fileKey, branches []string, opts build.Options) zoekt.Document {
+	return zoekt.Document{
+		SkipReason:        fmt.Sprintf("file size exceeds maximum size %d", opts.SizeMax),
+		Name:              key.FullPath(),
+		Branches:          branches,
+		SubRepositoryPath: key.SubRepoPath,
+	}
 }
 
 func blobContents(blob *object.Blob) ([]byte, error) {

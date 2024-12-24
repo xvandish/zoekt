@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/build"
 	"github.com/sourcegraph/zoekt/internal/archive"
@@ -39,12 +40,13 @@ func TestRanking(t *testing.T) {
 	requireCTags(t)
 
 	archiveURLs := []string{
-		"https://github.com/sourcegraph/sourcegraph/tree/v5.2.2",
-		"https://github.com/golang/go/tree/go1.21.4",
-		"https://github.com/sourcegraph/cody/tree/vscode-v0.14.5",
+		"https://github.com/sourcegraph/sourcegraph-public-snapshot/tree/v5.2.2", // Nov 1 2023
+		"https://github.com/golang/go/tree/go1.21.4",                             // Nov 7 2023
+		"https://github.com/sourcegraph/cody/tree/vscode-v0.14.5",                // Nov 8 2023
 		// The commit before ranking e2e tests were added to avoid matching
 		// content inside our golden files.
-		"https://github.com/xvandish/zoekt/commit/ef907c2371176aa3f97713d5bf182983ef090c6a",
+		"https://github.com/sourcegraph/zoekt/commit/ef907c2371176aa3f97713d5bf182983ef090c6a", // Nov 17 2023
+		"https://github.com/sourcegraph/conc/tree/5f936abd7ae87036af1f75c95fb9d0daaf00116b",    // Jan 21 2024
 	}
 	q := func(query, target string) rankingQuery {
 		return rankingQuery{Query: query, Target: target}
@@ -57,10 +59,10 @@ func TestRanking(t *testing.T) {
 		q("time compare\\(", "github.com/golang/go/src/time/time.go"),
 
 		// sourcegraph/sourcegraph
-		q("graphql type User", "github.com/sourcegraph/sourcegraph/cmd/frontend/graphqlbackend/schema.graphql"),
-		q("Get database/user", "github.com/sourcegraph/sourcegraph/internal/database/users.go"),
-		q("InternalDoer", "github.com/sourcegraph/sourcegraph/internal/httpcli/client.go"),
-		q("Repository metadata Write rbac", "github.com/sourcegraph/sourcegraph/internal/rbac/constants.go"), // unsure if this is the best doc?
+		q("graphql type User", "github.com/sourcegraph/sourcegraph-public-snapshot/cmd/frontend/graphqlbackend/schema.graphql"),
+		q("Get database/user", "github.com/sourcegraph/sourcegraph-public-snapshot/internal/database/users.go"),
+		q("InternalDoer", "github.com/sourcegraph/sourcegraph-public-snapshot/internal/httpcli/client.go"),
+		q("Repository metadata Write rbac", "github.com/sourcegraph/sourcegraph-public-snapshot/internal/rbac/constants.go"), // unsure if this is the best doc?
 
 		// cody
 		q("generate unit test", "github.com/sourcegraph/cody/lib/shared/src/chat/recipes/generate-test.ts"),
@@ -70,12 +72,15 @@ func TestRanking(t *testing.T) {
 		q("zoekt searcher", "github.com/sourcegraph/zoekt/api.go"),
 
 		// exact phrases
-		q("assets are not configured for this binary", "github.com/sourcegraph/sourcegraph/ui/assets/assets.go"),
-		q("sourcegraph/server docker image build", "github.com/sourcegraph/sourcegraph/dev/tools.go"),
+		q("assets are not configured for this binary", "github.com/sourcegraph/sourcegraph-public-snapshot/ui/assets/assets.go"),
+		q("sourcegraph/server docker image build", "github.com/sourcegraph/sourcegraph-public-snapshot/dev/tools.go"),
 
 		// symbols split up
 		q("bufio flush writer", "github.com/golang/go/src/net/http/transfer.go"),                        // bufioFlushWriter
 		q("coverage data writer", "github.com/golang/go/src/internal/coverage/encodecounter/encode.go"), // CoverageDataWriter
+
+		// sourcegraph/conc vs golang/go
+		q("WaitGroup", "github.com/sourcegraph/conc/waitgroup.go"),
 	}
 
 	var indexDir string
@@ -119,10 +124,6 @@ func TestRanking(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// q is marshalled as part of the test, so avoid our rewrites for
-			// ranking.
-			qSearch := query.ExpirementalPhraseBoost(q, rq.Query, query.ExperimentalPhraseBoostOptions{})
-
 			sOpts := zoekt.SearchOptions{
 				// Use the same options sourcegraph has by default
 				ChunkMatches:       true,
@@ -133,7 +134,7 @@ func TestRanking(t *testing.T) {
 
 				DebugScore: *debugScore,
 			}
-			result, err := ss.Search(context.Background(), qSearch, &sOpts)
+			result, err := ss.Search(context.Background(), q, &sOpts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -250,6 +251,11 @@ func indexURL(indexDir, u string) error {
 	err := archive.Index(opts, build.Options{
 		IndexDir:         indexDir,
 		CTagsMustSucceed: true,
+		RepositoryDescription: zoekt.Repository{
+			// Use the latest commit date to calculate the repo rank when loading the shard.
+			// This is the same setting we use in production.
+			RawConfig: map[string]string{"latestCommitDate": "1"},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to index %s: %w", opts.Archive, err)

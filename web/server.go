@@ -28,10 +28,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	texttemplate "text/template"
 	"time"
 
 	"github.com/grafana/regexp"
+
 	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/internal/tenant/systemtenant"
 	zjson "github.com/sourcegraph/zoekt/json"
 	"github.com/sourcegraph/zoekt/query"
 )
@@ -116,8 +119,9 @@ type Server struct {
 
 	startTime time.Time
 
-	templateMu    sync.Mutex
-	templateCache map[string]*template.Template
+	templateMu        sync.Mutex
+	templateCache     map[string]*template.Template
+	textTemplateCache map[string]*texttemplate.Template
 
 	lastStatsMu sync.Mutex
 	lastStats   *zoekt.RepoStats
@@ -134,10 +138,27 @@ func (s *Server) getTemplate(str string) *template.Template {
 
 	t, err := template.New("cache").Parse(str)
 	if err != nil {
-		log.Printf("template parse error: %v", err)
+		log.Printf("html template parse error: %v", err)
 		t = template.Must(template.New("empty").Parse(""))
 	}
 	s.templateCache[str] = t
+	return t
+}
+
+func (s *Server) getTextTemplate(str string) *texttemplate.Template {
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
+	t := s.textTemplateCache[str]
+	if t != nil {
+		return t
+	}
+
+	t, err := zoekt.ParseTemplate(str)
+	if err != nil {
+		log.Printf("text template parse error: %v", err)
+		t = texttemplate.Must(texttemplate.New("empty").Parse(""))
+	}
+	s.textTemplateCache[str] = t
 	return t
 }
 
@@ -162,6 +183,7 @@ func NewMux(s *Server) (*http.ServeMux, error) {
 	}
 
 	s.templateCache = map[string]*template.Template{}
+	s.textTemplateCache = map[string]*texttemplate.Template{}
 	s.startTime = time.Now()
 
 	mux := http.NewServeMux()
@@ -186,7 +208,10 @@ func (s *Server) serveHealthz(w http.ResponseWriter, r *http.Request) {
 	q := &query.Const{Value: true}
 	opts := &zoekt.SearchOptions{ShardMaxMatchCount: 1, TotalMaxMatchCount: 1, MaxDocDisplayCount: 1}
 
-	result, err := s.Searcher.Search(r.Context(), q, opts)
+	// We need to use WithUnsafeContext here because we want to perform a full
+	// search returning results. The result of this search is not used for anything
+	// other than determining if the server is healthy.
+	result, err := s.Searcher.Search(systemtenant.WithUnsafeContext(r.Context()), q, opts)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("not ready: %v", err), http.StatusInternalServerError)
 		return
@@ -240,13 +265,6 @@ func (s *Server) serveSearchErr(r *http.Request) (*ApiSearchResult, error) {
 		return nil, err
 	}
 
-	// Experimental: The query string and boost exact phrases of it.
-	if phraseBoost, err := strconv.ParseFloat(qvals.Get("phrase-boost"), 64); err == nil {
-		q = query.ExpirementalPhraseBoost(q, queryStr, query.ExperimentalPhraseBoostOptions{
-			Boost: phraseBoost,
-		})
-	}
-
 	repoOnly := true
 	query.VisitAtoms(q, func(q query.Q) {
 		_, ok := q.(*query.Repo)
@@ -280,12 +298,10 @@ func (s *Server) serveSearchErr(r *http.Request) (*ApiSearchResult, error) {
 	}
 
 	numCtxLines := 0
-	if qvals.Get("format") == "json" {
-		if ctxLinesStr := qvals.Get("ctx"); ctxLinesStr != "" {
-			numCtxLines, err = strconv.Atoi(ctxLinesStr)
-			if err != nil || numCtxLines < 0 || numCtxLines > 10 {
-				return nil, fmt.Errorf("Number of context lines must be between 0 and 10")
-			}
+	if ctxLinesStr := qvals.Get("ctx"); ctxLinesStr != "" {
+		numCtxLines, err = strconv.Atoi(ctxLinesStr)
+		if err != nil || numCtxLines < 0 || numCtxLines > 10 {
+			return nil, fmt.Errorf("Number of context lines must be between 0 and 10")
 		}
 	}
 	sOpts.NumContextLines = numCtxLines
@@ -313,6 +329,7 @@ func (s *Server) serveSearchErr(r *http.Request) (*ApiSearchResult, error) {
 		Last: LastInput{
 			Query:     queryStr,
 			Num:       num,
+			Ctx:       numCtxLines,
 			AutoFocus: true,
 		},
 		Stats:       result.Stats,
@@ -518,7 +535,7 @@ func (s *Server) serveListReposErr(q query.Q, qStr string, r *http.Request) (*Re
 	}
 
 	for _, r := range repos.Repos {
-		t := s.getTemplate(r.Repository.CommitURLTemplate)
+		t := s.getTextTemplate(r.Repository.CommitURLTemplate)
 
 		repo := Repository{
 			Name:       r.Repository.Name,

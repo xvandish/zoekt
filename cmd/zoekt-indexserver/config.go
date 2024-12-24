@@ -54,6 +54,7 @@ type ConfigEntry struct {
 	NoArchived             bool
 	GerritFetchMetaConfig  bool
 	GerritRepoNameFormat   string
+	ExcludeUserRepos       bool
 }
 
 func (c ConfigEntry) IsGithubConfig() bool {
@@ -266,6 +267,9 @@ func executeMirror(cfg []ConfigEntry, repoDir string, opts *Options, pendingRepo
 			}
 			if c.OnlyPublic {
 				cmd.Args = append(cmd.Args, "-public")
+			}
+			if c.ExcludeUserRepos {
+				cmd.Args = append(cmd.Args, "-exclude_user")
 			}
 			if c.CredentialPath != "" {
 				cmd.Args = append(cmd.Args, "-token", c.CredentialPath)

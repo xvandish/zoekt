@@ -18,9 +18,10 @@ import (
 	"math/rand"
 	"reflect"
 
-	proto "github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	proto "github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
 )
 
 func FileMatchFromProto(p *proto.FileMatch) FileMatch {
@@ -432,6 +433,7 @@ func RepositoryFromProto(p *proto.Repository) Repository {
 	}
 
 	return Repository{
+		TenantID:             int(p.GetTenantId()),
 		ID:                   p.GetId(),
 		Name:                 p.GetName(),
 		URL:                  p.GetUrl(),
@@ -473,6 +475,7 @@ func (r *Repository) ToProto() *proto.Repository {
 	}
 
 	return &proto.Repository{
+		TenantId:             int64(r.TenantID),
 		Id:                   r.ID,
 		Name:                 r.Name,
 		Url:                  r.URL,
@@ -696,8 +699,6 @@ func SearchOptionsFromProto(p *proto.SearchOptions) *SearchOptions {
 		MaxMatchDisplayCount:                int(p.GetMaxMatchDisplayCount()),
 		NumContextLines:                     int(p.GetNumContextLines()),
 		ChunkMatches:                        p.GetChunkMatches(),
-		UseDocumentRanks:                    p.GetUseDocumentRanks(),
-		DocumentRanksWeight:                 p.GetDocumentRanksWeight(),
 		Trace:                               p.GetTrace(),
 		DebugScore:                          p.GetDebugScore(),
 		UseBM25Scoring:                      p.GetUseBm25Scoring(),
@@ -723,8 +724,6 @@ func (s *SearchOptions) ToProto() *proto.SearchOptions {
 		MaxMatchDisplayCount:                int64(s.MaxMatchDisplayCount),
 		NumContextLines:                     int64(s.NumContextLines),
 		ChunkMatches:                        s.ChunkMatches,
-		UseDocumentRanks:                    s.UseDocumentRanks,
-		DocumentRanksWeight:                 s.DocumentRanksWeight,
 		Trace:                               s.Trace,
 		DebugScore:                          s.DebugScore,
 		UseBm25Scoring:                      s.UseBM25Scoring,

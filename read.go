@@ -21,6 +21,7 @@ import (
 	"hash/crc64"
 	"log"
 	"os"
+	"slices"
 	"sort"
 
 	"github.com/rs/xid"
@@ -94,20 +95,15 @@ func (r *reader) Str() (string, error) {
 }
 
 func (r *reader) readTOC(toc *indexTOC) error {
-	sz, err := r.r.Size()
-	if err != nil {
-		return err
-	}
-	r.off = sz - 8
+	return r.readTOCSections(toc, []string{})
+}
 
-	var tocSection simpleSection
-	if err := tocSection.read(r); err != nil {
-		return err
-	}
-
-	r.seek(tocSection.off)
-
-	sectionCount, err := r.U32()
+// readTOCSections reads the table of contents of the index file.
+//
+// If the tags parameter is non-empty, it reads only those tagged sections for efficiency
+// and does not populate the other sections.
+func (r *reader) readTOCSections(toc *indexTOC, tags []string) error {
+	tocSection, sectionCount, err := r.readHeader()
 	if err != nil {
 		return err
 	}
@@ -125,27 +121,33 @@ func (r *reader) readTOC(toc *indexTOC) error {
 			if err != nil {
 				return err
 			}
+
+			skipSection := len(tags) > 0 && !slices.Contains(tags, tag)
 			sec := secs[tag]
-			if sec != nil && sec.kind() == sectionKind(kind) {
-				// happy path
-				if err := sec.read(r); err != nil {
+			if sec == nil || sec.kind() != sectionKind(kind) {
+				// If we don't recognize the section, we may be reading a newer index than the current version. Use
+				// a "dummy section" struct to skip over it.
+				skipSection = true
+				log.Printf("encountered unrecognized index section (%s), skipping over it", tag)
+
+				switch sectionKind(kind) {
+				case sectionKindSimple:
+					sec = &simpleSection{}
+				case sectionKindCompound:
+					sec = &compoundSection{}
+				case sectionKindCompoundLazy:
+					sec = &lazyCompoundSection{}
+				default:
+					return fmt.Errorf("unknown section kind %d", kind)
+				}
+			}
+
+			if skipSection {
+				if err := sec.skip(r); err != nil {
 					return err
 				}
-				continue
-			}
-			// error case: skip over unknown section
-			if sec == nil {
-				log.Printf("file %s TOC has unknown section %q", r.r.Name(), tag)
 			} else {
-				return fmt.Errorf("file %s TOC section %q expects kind %d, got kind %d", r.r.Name(), tag,
-					kind, sec.kind())
-			}
-			if kind == 0 {
-				if err := (&simpleSection{}).read(r); err != nil {
-					return err
-				}
-			} else if kind == 1 {
-				if err := (&compoundSection{}).read(r); err != nil {
+				if err := sec.read(r); err != nil {
 					return err
 				}
 			}
@@ -170,6 +172,27 @@ func (r *reader) readTOC(toc *indexTOC) error {
 		}
 	}
 	return nil
+}
+
+func (r *reader) readHeader() (simpleSection, uint32, error) {
+	sz, err := r.r.Size()
+	if err != nil {
+		return simpleSection{}, 0, err
+	}
+	r.off = sz - 8
+
+	var tocSection simpleSection
+	if err := tocSection.read(r); err != nil {
+		return simpleSection{}, 0, err
+	}
+
+	r.seek(tocSection.off)
+
+	sectionCount, err := r.U32()
+	if err != nil {
+		return simpleSection{}, 0, err
+	}
+	return tocSection, sectionCount, nil
 }
 
 func (r *indexData) readSectionBlob(sec simpleSection) ([]byte, error) {
@@ -208,7 +231,7 @@ func readSectionU64(f IndexFile, sec simpleSection) ([]uint64, error) {
 	return arr, nil
 }
 
-func (r *reader) readJSON(data interface{}, sec *simpleSection) error {
+func (r *reader) readJSON(data interface{}, sec simpleSection) error {
 	blob, err := r.r.Read(sec.off, sec.sz)
 	if err != nil {
 		return err
@@ -231,7 +254,7 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 		branchNames: []map[uint]string{},
 	}
 
-	repos, md, err := r.readMetadata(toc)
+	repos, md, err := r.parseMetadata(toc.metaData, toc.repoMetaData)
 	if md != nil && !canReadVersion(md) {
 		return nil, fmt.Errorf("file is v%d, want v%d", md.IndexFormatVersion, IndexFormatVersion)
 	} else if err != nil {
@@ -371,15 +394,6 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 		return nil, err
 	}
 
-	// roc.ranks.sz = 0 indicates that we are reading a shard without ranks, in
-	// which case we skip reading the section and leave d.ranks = nil
-	if toc.ranks.sz > 0 {
-		err = d.readRanks(toc)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	if d.metaData.IndexFormatVersion >= 17 {
 		blob, err := d.readSectionBlob(toc.repos)
 		if err != nil {
@@ -398,9 +412,9 @@ func (r *reader) readIndexData(toc *indexTOC) (*indexData, error) {
 	return &d, nil
 }
 
-func (r *reader) readMetadata(toc *indexTOC) ([]*Repository, *IndexMetadata, error) {
+func (r *reader) parseMetadata(metaData simpleSection, repoMetaData simpleSection) ([]*Repository, *IndexMetadata, error) {
 	var md IndexMetadata
-	if err := r.readJSON(&md, &toc.metaData); err != nil {
+	if err := r.readJSON(&md, metaData); err != nil {
 		return nil, nil, err
 	}
 
@@ -413,7 +427,7 @@ func (r *reader) readMetadata(toc *indexTOC) ([]*Repository, *IndexMetadata, err
 	}
 
 	if len(blob) == 0 {
-		blob, err = r.r.Read(toc.repoMetaData.off, toc.repoMetaData.sz)
+		blob, err = r.r.Read(repoMetaData.off, repoMetaData.sz)
 		if err != nil {
 			return nil, &md, err
 		}
@@ -543,15 +557,6 @@ func (d *indexData) readDocSections(i uint32, buf []DocumentSection) ([]Document
 	return ds, sec.sz, nil
 }
 
-func (d *indexData) readRanks(toc *indexTOC) error {
-	blob, err := d.readSectionBlob(toc.ranks)
-	if err != nil {
-		return err
-	}
-
-	return decodeRanks(blob, &d.ranks)
-}
-
 // NewSearcher creates a Searcher for a single index file.  Search
 // results coming from this searcher are valid only for the lifetime
 // of the Searcher itself, ie. []byte members should be copied into
@@ -576,11 +581,11 @@ func NewSearcher(r IndexFile) (Searcher, error) {
 func ReadMetadata(inf IndexFile) ([]*Repository, *IndexMetadata, error) {
 	rd := &reader{r: inf}
 	var toc indexTOC
-	if err := rd.readTOC(&toc); err != nil {
+	err := rd.readTOCSections(&toc, []string{"metaData", "repoMetaData"})
+	if err != nil {
 		return nil, nil, err
 	}
-
-	return rd.readMetadata(&toc)
+	return rd.parseMetadata(toc.metaData, toc.repoMetaData)
 }
 
 // ReadMetadataPathAlive is like ReadMetadataPath except that it only returns

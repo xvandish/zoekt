@@ -22,7 +22,10 @@ import (
 	"runtime/pprof"
 	"strings"
 
+	"github.com/dustin/go-humanize"
 	"go.uber.org/automaxprocs/maxprocs"
+
+	"github.com/sourcegraph/zoekt/internal/profiler"
 
 	"github.com/sourcegraph/zoekt/cmd"
 	"github.com/sourcegraph/zoekt/ctags"
@@ -30,8 +33,6 @@ import (
 )
 
 func run() int {
-	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to `file`")
-
 	allowMissing := flag.Bool("allow_missing_branches", false, "allow missing branches.")
 	submodules := flag.Bool("submodules", true, "if set to false, do not recurse into submodules")
 	branchesStr := flag.String("branches", "HEAD", "git branches to index.")
@@ -44,16 +45,17 @@ func run() int {
 		"It also affects name if the indexed repository is under this directory.")
 	isDelta := flag.Bool("delta", false, "whether we should use delta build")
 	deltaShardNumberFallbackThreshold := flag.Uint64("delta_threshold", 0, "upper limit on the number of preexisting shards that can exist before attempting a delta build (0 to disable fallback behavior)")
-	offlineRanking := flag.String("offline_ranking", "", "the name of the file that contains the ranking info.")
-	offlineRankingVersion := flag.String("offline_ranking_version", "", "a version string identifying the contents in offline_ranking.")
 	languageMap := flag.String("language_map", "", "a mapping between a language and its ctags processor (a:0,b:3).")
+
+	cpuProfile := flag.String("cpuprofile", "", "write cpu profile to `file`")
+
 	flag.Parse()
 
 	// Tune GOMAXPROCS to match Linux container CPU quota.
 	_, _ = maxprocs.Set()
 
-	if *cpuprofile != "" {
-		f, err := os.Create(*cpuprofile)
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
 		if err != nil {
 			log.Fatal("could not create CPU profile: ", err)
 		}
@@ -71,10 +73,9 @@ func run() int {
 		}
 		*repoCacheDir = dir
 	}
+
 	opts := cmd.OptionsFromFlags()
 	opts.IsDelta = *isDelta
-	opts.DocumentRanksPath = *offlineRanking
-	opts.DocumentRanksVersion = *offlineRankingVersion
 
 	var branches []string
 	if *branchesStr != "" {
@@ -108,6 +109,16 @@ func run() int {
 		opts.LanguageMap[m[0]] = ctags.StringToParser(m[1])
 	}
 
+	if heapProfileTrigger := os.Getenv("ZOEKT_HEAP_PROFILE_TRIGGER"); heapProfileTrigger != "" {
+		trigger, err := humanize.ParseBytes(heapProfileTrigger)
+		if err != nil {
+			log.Printf("invalid value for ZOEKT_HEAP_PROFILE_TRIGGER: %v", err)
+		} else {
+			opts.HeapProfileTriggerBytes = trigger
+		}
+	}
+
+	profiler.Init("zoekt-git-index")
 	exitStatus := 0
 	for dir, name := range gitRepos {
 		opts.RepositoryDescription.Name = name

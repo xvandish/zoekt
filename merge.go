@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+
+	"github.com/sourcegraph/zoekt/internal/tenant"
 )
 
 // Merge files into a compound shard in dstDir. Merge returns tmpName and a
@@ -160,10 +161,18 @@ func explode(dstDir string, f IndexFile, ibFuncs ...indexBuilderFunc) (map[strin
 		for _, ibFunc := range ibFuncs {
 			ibFunc(ib)
 		}
-		fn := filepath.Join(dstDir, shardName(ib.repoList[0].Name, ib.indexFormatVersion, 0))
-		fnTmp := fn + ".tmp"
-		shardNames[fnTmp] = fn
-		return builderWriteAll(fnTmp, ib)
+
+		prefix := ""
+		if tenant.EnforceTenant() {
+			prefix = tenant.SrcPrefix(ib.repoList[0].TenantID, ib.repoList[0].ID)
+		} else {
+			prefix = ib.repoList[0].Name
+		}
+
+		shardName := ShardName(dstDir, prefix, ib.indexFormatVersion, 0)
+		shardNameTmp := shardName + ".tmp"
+		shardNames[shardNameTmp] = shardName
+		return builderWriteAll(shardNameTmp, ib)
 	}
 
 	var ib *IndexBuilder
@@ -253,13 +262,4 @@ func hashString(s string) string {
 	h := sha1.New()
 	_, _ = io.WriteString(h, s)
 	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-// copied from builder package to avoid circular imports.
-func shardName(name string, version, n int) string {
-	abs := url.QueryEscape(name)
-	if len(abs) > 200 {
-		abs = abs[:200] + hashString(abs)[:8]
-	}
-	return fmt.Sprintf("%s_v%d.%05d.zoekt", abs, version, n)
 }

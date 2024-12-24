@@ -17,8 +17,10 @@ package shards
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -38,6 +40,14 @@ import (
 	"github.com/sourcegraph/zoekt"
 	"github.com/sourcegraph/zoekt/query"
 )
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	if !testing.Verbose() {
+		log.SetOutput(io.Discard)
+	}
+	os.Exit(m.Run())
+}
 
 type crashSearcher struct{}
 
@@ -59,8 +69,10 @@ func (s *crashSearcher) String() string { return "crashSearcher" }
 
 func TestCrashResilience(t *testing.T) {
 	out := &bytes.Buffer{}
+	oldOut := log.Writer()
 	log.SetOutput(out)
-	defer log.SetOutput(os.Stderr)
+	defer log.SetOutput(oldOut)
+
 	ss := newShardedSearcher(2)
 	ss.ranked.Store([]*rankedShard{{Searcher: &crashSearcher{}}})
 
@@ -229,12 +241,12 @@ func TestShardedSearcher_DocumentRanking(t *testing.T) {
 	ss := newShardedSearcher(1)
 
 	var nextShardNum int
-	addShard := func(repo string, priority float64, docs ...zoekt.Document) {
+	addShard := func(repo string, rank uint16, docs ...zoekt.Document) {
 		r := &zoekt.Repository{ID: hash(repo), Name: repo}
 		r.RawConfig = map[string]string{
-			"public":   "1",
-			"priority": strconv.FormatFloat(priority, 'f', 2, 64),
+			"public": "1",
 		}
+		r.Rank = rank
 		b := testIndexBuilder(t, r, docs...)
 		shard := searcherForTest(t, b)
 		ss.replace(map[string]zoekt.Searcher{
@@ -243,17 +255,16 @@ func TestShardedSearcher_DocumentRanking(t *testing.T) {
 		nextShardNum++
 	}
 
-	addShard("weekend-project", 20, zoekt.Document{Name: "f1", Content: []byte("foobar")})
-	addShard("moderately-popular", 500, zoekt.Document{Name: "f2", Content: []byte("foobaz")})
-	addShard("weekend-project-2", 20, zoekt.Document{Name: "f3", Content: []byte("foo bar")})
-	addShard("super-star", 5000, zoekt.Document{Name: "f4", Content: []byte("foo baz")},
+	addShard("old-project", 1, zoekt.Document{Name: "f1", Content: []byte("foobar")})
+	addShard("recent", 2, zoekt.Document{Name: "f2", Content: []byte("foobaz")})
+	addShard("old-project-2", 1, zoekt.Document{Name: "f3", Content: []byte("foo bar")})
+	addShard("new", 3, zoekt.Document{Name: "f4", Content: []byte("foo baz")},
 		zoekt.Document{Name: "f5", Content: []byte("fooooo")})
 
 	// Run a stream search and gather the results
 	var results []*zoekt.SearchResult
 	opts := &zoekt.SearchOptions{
-		UseDocumentRanks: true,
-		FlushWallTime:    100 * time.Millisecond,
+		FlushWallTime: 100 * time.Millisecond,
 	}
 
 	err := ss.StreamSearch(context.Background(), &query.Substring{Pattern: "foo"}, opts,
@@ -1134,7 +1145,6 @@ func testShardedStreamSearch(t *testing.T, q query.Q, ib *zoekt.IndexBuilder, us
 
 	opts := zoekt.SearchOptions{}
 	if useDocumentRanks {
-		opts.UseDocumentRanks = true
 		opts.FlushWallTime = 10 * time.Millisecond
 	}
 	if err := ss.StreamSearch(context.Background(), q, &opts, sender); err != nil {
@@ -1150,7 +1160,6 @@ func testShardedSearch(t *testing.T, q query.Q, ib *zoekt.IndexBuilder, useDocum
 
 	opts := zoekt.SearchOptions{}
 	if useDocumentRanks {
-		opts.UseDocumentRanks = true
 		opts.FlushWallTime = 50 * time.Millisecond
 	}
 	sres, _ := ss.Search(context.Background(), q, &opts)

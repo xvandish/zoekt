@@ -14,11 +14,14 @@ import (
 	"time"
 
 	"github.com/sourcegraph/log/logtest"
-	proto "github.com/sourcegraph/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
-	"github.com/sourcegraph/zoekt/ctags"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	proto "github.com/sourcegraph/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
+	"github.com/sourcegraph/zoekt/ctags"
+	"github.com/sourcegraph/zoekt/internal/tenant/tenanttest"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -472,6 +475,76 @@ func TestGetIndexOptions(t *testing.T) {
 	})
 }
 
+func TestIndexTenant(t *testing.T) {
+	tenanttest.MockEnforce(t)
+
+	cases := []struct {
+		name                   string
+		args                   indexArgs
+		mockRepositoryMetadata *zoekt.Repository
+		want                   []string
+	}{
+		{
+			name: "prefix",
+			args: indexArgs{
+				IndexOptions: IndexOptions{
+					RepoID:   13,
+					Name:     "test/repo",
+					CloneURL: "http://api.test/.internal/git/test/repo",
+					Branches: []zoekt.RepositoryBranch{{Name: "HEAD", Version: "deadbeef"}},
+					TenantID: 42,
+				},
+			},
+			want: []string{
+				"git -c init.defaultBranch=nonExistentBranchBB0FOFCH32 init --bare $TMPDIR/test%2Frepo.git",
+				"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal -c http.extraHeader=X-Sourcegraph-Tenant-ID: 42 fetch --depth=1 --no-tags --filter=blob:limit=1m http://api.test/.internal/git/test/repo deadbeef",
+				"git -C $TMPDIR/test%2Frepo.git update-ref HEAD deadbeef",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.archived 0",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.fork 0",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.latestCommitDate 1",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.name test/repo",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.priority 0",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.public 0",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.repoid 13",
+				"git -C $TMPDIR/test%2Frepo.git config zoekt.tenantID 42",
+				"zoekt-git-index -submodules=false -branches HEAD -disable_ctags -shard_prefix 000000042_000000013 $TMPDIR/test%2Frepo.git",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			runCmd := func(c *exec.Cmd) error {
+				cmd := strings.Join(c.Args, " ")
+				cmd = strings.ReplaceAll(cmd, filepath.Clean(os.TempDir()), "$TMPDIR")
+				got = append(got, cmd)
+				return nil
+			}
+
+			findRepositoryMetadata := func(args *indexArgs) (repository *zoekt.Repository, metadata *zoekt.IndexMetadata, ok bool, err error) {
+				if tc.mockRepositoryMetadata == nil {
+					return args.BuildOptions().FindRepositoryMetadata()
+				}
+
+				return tc.mockRepositoryMetadata, &zoekt.IndexMetadata{}, true, nil
+			}
+
+			c := gitIndexConfig{
+				runCmd:                 runCmd,
+				findRepositoryMetadata: findRepositoryMetadata,
+			}
+
+			if err := gitIndex(c, &tc.args, sourcegraphNop{}, logtest.Scoped(t)); err != nil {
+				t.Fatal(err)
+			}
+			if !cmp.Equal(got, tc.want) {
+				t.Errorf("git mismatch (-want +got):\n%s", cmp.Diff(tc.want, got, splitargs))
+			}
+		})
+	}
+}
+
 func TestIndex(t *testing.T) {
 	cases := []struct {
 		name                   string
@@ -485,18 +558,21 @@ func TestIndex(t *testing.T) {
 				Name:     "test/repo",
 				CloneURL: "http://api.test/.internal/git/test/repo",
 				Branches: []zoekt.RepositoryBranch{{Name: "HEAD", Version: "deadbeef"}},
+				TenantID: 42,
 			},
 		},
 		want: []string{
 			"git -c init.defaultBranch=nonExistentBranchBB0FOFCH32 init --bare $TMPDIR/test%2Frepo.git",
-			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal fetch --depth=1 http://api.test/.internal/git/test/repo deadbeef",
+			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal -c http.extraHeader=X-Sourcegraph-Tenant-ID: 42 fetch --depth=1 --no-tags --filter=blob:limit=1m http://api.test/.internal/git/test/repo deadbeef",
 			"git -C $TMPDIR/test%2Frepo.git update-ref HEAD deadbeef",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.archived 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.fork 0",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.latestCommitDate 1",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.name test/repo",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.priority 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.public 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.repoid 0",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.tenantID 42",
 			"zoekt-git-index -submodules=false -branches HEAD -disable_ctags $TMPDIR/test%2Frepo.git",
 		},
 	}, {
@@ -507,18 +583,21 @@ func TestIndex(t *testing.T) {
 				CloneURL: "http://api.test/.internal/git/test/repo",
 				Branches: []zoekt.RepositoryBranch{{Name: "HEAD", Version: "deadbeef"}},
 				RepoID:   123,
+				TenantID: 1,
 			},
 		},
 		want: []string{
 			"git -c init.defaultBranch=nonExistentBranchBB0FOFCH32 init --bare $TMPDIR/test%2Frepo.git",
-			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal fetch --depth=1 http://api.test/.internal/git/test/repo deadbeef",
+			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal -c http.extraHeader=X-Sourcegraph-Tenant-ID: 1 fetch --depth=1 --no-tags --filter=blob:limit=1m http://api.test/.internal/git/test/repo deadbeef",
 			"git -C $TMPDIR/test%2Frepo.git update-ref HEAD deadbeef",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.archived 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.fork 0",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.latestCommitDate 1",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.name test/repo",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.priority 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.public 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.repoid 123",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.tenantID 1",
 			"zoekt-git-index -submodules=false -branches HEAD -disable_ctags $TMPDIR/test%2Frepo.git",
 		},
 	}, {
@@ -537,19 +616,22 @@ func TestIndex(t *testing.T) {
 					{Name: "HEAD", Version: "deadbeef"},
 					{Name: "dev", Version: "feebdaed"}, // ignored for archive
 				},
+				TenantID: 1,
 			},
 		},
 		want: []string{
 			"git -c init.defaultBranch=nonExistentBranchBB0FOFCH32 init --bare $TMPDIR/test%2Frepo.git",
-			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal fetch --depth=1 http://api.test/.internal/git/test/repo deadbeef feebdaed",
+			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal -c http.extraHeader=X-Sourcegraph-Tenant-ID: 1 fetch --depth=1 --no-tags http://api.test/.internal/git/test/repo deadbeef feebdaed",
 			"git -C $TMPDIR/test%2Frepo.git update-ref HEAD deadbeef",
 			"git -C $TMPDIR/test%2Frepo.git update-ref refs/heads/dev feebdaed",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.archived 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.fork 0",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.latestCommitDate 1",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.name test/repo",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.priority 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.public 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.repoid 0",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.tenantID 1",
 			"zoekt-git-index -submodules=false -incremental -branches HEAD,dev " +
 				"-file_limit 123 -parallelism 4 -index /data/index -require_ctags -large_file foo -large_file bar " +
 				"$TMPDIR/test%2Frepo.git",
@@ -573,6 +655,7 @@ func TestIndex(t *testing.T) {
 					{Name: "dev", Version: "feebdaed"},
 					{Name: "release", Version: "12345678"},
 				},
+				TenantID: 1,
 			},
 			DeltaShardNumberFallbackThreshold: 22,
 		},
@@ -587,16 +670,18 @@ func TestIndex(t *testing.T) {
 		},
 		want: []string{
 			"git -c init.defaultBranch=nonExistentBranchBB0FOFCH32 init --bare $TMPDIR/test%2Frepo.git",
-			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal fetch --depth=1 http://api.test/.internal/git/test/repo deadbeef feebdaed 12345678 oldhead olddev oldrelease",
+			"git -C $TMPDIR/test%2Frepo.git -c protocol.version=2 -c http.extraHeader=X-Sourcegraph-Actor-UID: internal -c http.extraHeader=X-Sourcegraph-Tenant-ID: 1 fetch --depth=1 --no-tags http://api.test/.internal/git/test/repo deadbeef feebdaed 12345678 oldhead olddev oldrelease",
 			"git -C $TMPDIR/test%2Frepo.git update-ref HEAD deadbeef",
 			"git -C $TMPDIR/test%2Frepo.git update-ref refs/heads/dev feebdaed",
 			"git -C $TMPDIR/test%2Frepo.git update-ref refs/heads/release 12345678",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.archived 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.fork 0",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.latestCommitDate 1",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.name test/repo",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.priority 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.public 0",
 			"git -C $TMPDIR/test%2Frepo.git config zoekt.repoid 0",
+			"git -C $TMPDIR/test%2Frepo.git config zoekt.tenantID 1",
 			"zoekt-git-index -submodules=false -incremental -branches HEAD,dev,release " +
 				"-delta -delta_threshold 22 -file_limit 123 -parallelism 4 -index /data/index -require_ctags -large_file foo -large_file bar " +
 				"$TMPDIR/test%2Frepo.git",
@@ -643,7 +728,6 @@ var splitargs = cmpopts.AcyclicTransformer("splitargs", func(cmd string) []strin
 type mockGRPCClient struct {
 	mockSearchConfiguration func(context.Context, *proto.SearchConfigurationRequest, ...grpc.CallOption) (*proto.SearchConfigurationResponse, error)
 	mockList                func(context.Context, *proto.ListRequest, ...grpc.CallOption) (*proto.ListResponse, error)
-	mockDocumentRanks       func(context.Context, *proto.DocumentRanksRequest, ...grpc.CallOption) (*proto.DocumentRanksResponse, error)
 	mockUpdateIndexStatus   func(context.Context, *proto.UpdateIndexStatusRequest, ...grpc.CallOption) (*proto.UpdateIndexStatusResponse, error)
 }
 
@@ -663,14 +747,6 @@ func (m *mockGRPCClient) List(ctx context.Context, in *proto.ListRequest, opts .
 	return nil, fmt.Errorf("mock RPC List not implemented")
 }
 
-func (m *mockGRPCClient) DocumentRanks(ctx context.Context, in *proto.DocumentRanksRequest, opts ...grpc.CallOption) (*proto.DocumentRanksResponse, error) {
-	if m.mockDocumentRanks != nil {
-		return m.mockDocumentRanks(ctx, in, opts...)
-	}
-
-	return nil, fmt.Errorf("mock RPC DocumentRanks not implemented")
-}
-
 func (m *mockGRPCClient) UpdateIndexStatus(ctx context.Context, in *proto.UpdateIndexStatusRequest, opts ...grpc.CallOption) (*proto.UpdateIndexStatusResponse, error) {
 	if m.mockUpdateIndexStatus != nil {
 		return m.mockUpdateIndexStatus(ctx, in, opts...)
@@ -680,3 +756,30 @@ func (m *mockGRPCClient) UpdateIndexStatus(ctx context.Context, in *proto.Update
 }
 
 var _ proto.ZoektConfigurationServiceClient = &mockGRPCClient{}
+
+// Tests whether we can set git config values without error.
+func TestSetZoektConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	// init git dir
+	script := `mkdir repo
+cd repo
+git init -b main
+`
+	cmd := exec.Command("/bin/sh", "-euxc", script)
+	cmd.Dir = dir
+	_, err := cmd.CombinedOutput()
+	require.NoError(t, err)
+
+	var out []byte
+	c := gitIndexConfig{
+		runCmd: func(cmd *exec.Cmd) error {
+			var err error
+			out, err = cmd.CombinedOutput()
+			return err
+		},
+	}
+
+	err = setZoektConfig(context.Background(), filepath.Join(dir, "repo"), &indexArgs{}, c)
+	require.NoError(t, err, string(out))
+}

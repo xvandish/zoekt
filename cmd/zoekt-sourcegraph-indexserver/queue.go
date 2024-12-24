@@ -73,26 +73,31 @@ func NewQueue(backoffDuration, maxBackoffDuration time.Duration, l sglog.Logger)
 		}
 	}
 
-	q := &Queue{
-		newQueueItem: newQueueItem,
+	return &Queue{
+		items:        map[uint32]*queueItem{},
+		pq:           make(pqueue, 0),
+		seq:          0,
 		logger:       l.Scoped("queue"),
+		newQueueItem: newQueueItem,
 	}
-
-	q.init()
-	return q
 }
 
-// Pop returns the opts of the next repo to index. If the queue is empty ok is
-// false.
-func (q *Queue) Pop() (opts IndexOptions, ok bool) {
+type QueueItem struct {
+	// Opts are the options to use when indexing the repo.
+	Opts IndexOptions
+	// DateAddedToQueue is the time when this indexing job was added to the queue, used for telemetry.
+	DateAddedToQueue time.Time
+}
+
+// Pop returns options and metadata for the next repo to index. If the queue is empty ok is false.
+func (q *Queue) Pop() (result QueueItem, ok bool) {
 	q.mu.Lock()
 	if len(q.pq) == 0 {
 		q.mu.Unlock()
-		return IndexOptions{}, false
+		return QueueItem{}, false
 	}
 
 	item := heap.Pop(&q.pq).(*queueItem)
-	opts = item.opts
 
 	metricQueueLen.Set(float64(len(q.pq)))
 	metricQueueCap.Set(float64(len(q.items)))
@@ -102,11 +107,7 @@ func (q *Queue) Pop() (opts IndexOptions, ok bool) {
 
 	q.mu.Unlock()
 
-	name := repoNameForMetric(opts.Name)
-	age := time.Since(dateAdded)
-	metricQueueAge.WithLabelValues(name).Observe(age.Seconds())
-
-	return opts, true
+	return QueueItem{item.opts, dateAdded}, true
 }
 
 // Len returns the number of items in the queue.
@@ -148,10 +149,6 @@ func (q *Queue) AddOrUpdate(opts IndexOptions) {
 func (q *Queue) Bump(ids []uint32) []uint32 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
-	if q.items == nil {
-		q.init()
-	}
 
 	var missing []uint32
 	for _, id := range ids {
@@ -319,7 +316,7 @@ func (q *Queue) MaybeRemoveMissing(ids []uint32) []uint32 {
 
 	// heuristically skip expensive work
 	if sameSize {
-		debug.Printf("skipping MaybeRemoveMissing due to same size: %d", len(ids))
+		debugLog.Printf("skipping MaybeRemoveMissing due to same size: %d", len(ids))
 		return nil
 	}
 
@@ -359,10 +356,6 @@ func (q *Queue) MaybeRemoveMissing(ids []uint32) []uint32 {
 //
 // Note: getOrAdd requires that q.mu is held.
 func (q *Queue) getOrAdd(repoID uint32) *queueItem {
-	if q.items == nil {
-		q.init()
-	}
-
 	item, ok := q.items[repoID]
 	if !ok {
 		item = q.newQueueItem(repoID)
@@ -377,11 +370,6 @@ func (q *Queue) getOrAdd(repoID uint32) *queueItem {
 // Note: get requires that q.mu is held.
 func (q *Queue) get(repoID uint32) *queueItem {
 	return q.items[repoID]
-}
-
-func (q *Queue) init() {
-	q.items = map[uint32]*queueItem{}
-	q.pq = make(pqueue, 0)
 }
 
 // pqueue implements a priority queue via the interface for container/heap
@@ -444,25 +432,4 @@ var (
 		Name: "index_queue_cap",
 		Help: "The number of repositories tracked by the index queue, including popped items. Should be the same as index_num_assigned.",
 	})
-	metricQueueAge = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "index_queue_age_seconds",
-		Help: "A histogram of the amount of time a popped repository spent sitting in the queue beforehand.",
-		Buckets: []float64{
-			60,     // 1m
-			300,    // 5m
-			1200,   // 20m
-			2400,   // 40m
-			3600,   // 1h
-			10800,  // 3h
-			18000,  // 5h
-			36000,  // 10h
-			43200,  // 12h
-			54000,  // 15h
-			72000,  // 20h
-			86400,  // 24h
-			108000, // 30h
-			126000, // 35h
-			172800, // 48h
-		},
-	}, []string{"name"}) // name=name of the repository that was just popped from the queue
 )

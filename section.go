@@ -15,10 +15,7 @@
 package zoekt
 
 import (
-	"bytes"
 	"encoding/binary"
-	"encoding/gob"
-	"fmt"
 	"io"
 	"log"
 )
@@ -74,48 +71,6 @@ func (w *writer) String(s string) {
 	w.Write(b)
 }
 
-func encodeRanks(w io.Writer, ranks [][]float64) error {
-	hasRank := false
-	for _, r := range ranks {
-		if len(r) > 0 {
-			hasRank = true
-			break
-		}
-	}
-
-	if !hasRank {
-		return nil
-	}
-
-	// We use the first byte to announce the encoding. This way we can easily change the
-	// encoding without loosing backward compatability.
-	_, err := w.Write([]byte{0}) // 0 = gob-encoding
-	if err != nil {
-		return err
-	}
-
-	return gob.NewEncoder(w).Encode(ranks)
-}
-
-func decodeRanks(blob []byte, ranks *[][]float64) error {
-	if len(blob) == 0 {
-		return nil
-	}
-
-	switch encoding := blob[0]; encoding {
-	case 0: // gob-encoding
-		dec := gob.NewDecoder(bytes.NewReader(blob[1:]))
-		err := dec.Decode(ranks)
-		if err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unknown encoding for ranks: %d\n", encoding)
-	}
-
-	return nil
-}
-
 func (s *simpleSection) start(w *writer) {
 	s.off = w.Off()
 }
@@ -127,8 +82,12 @@ func (s *simpleSection) end(w *writer) {
 // section is a range of bytes in the index file.
 type section interface {
 	read(*reader) error
+	// skip advances over the data in the section without reading it.
+	// NOTE: the section will not contain valid data after this call, and it should not be used.
+	skip(*reader) error
 	write(*writer)
-	kind() sectionKind // simple or complex, used in serialization
+	// kind encodes whether the section is simple or compound, and is used in serialization
+	kind() sectionKind
 }
 
 type sectionKind int
@@ -156,10 +115,17 @@ func (s *simpleSection) read(r *reader) error {
 		return err
 	}
 	s.sz, err = r.U32()
+	return err
+}
+
+func (s *simpleSection) skip(r *reader) error {
+	var err error
+	_, err = r.U32()
 	if err != nil {
 		return err
 	}
-	return nil
+	_, err = r.U32()
+	return err
 }
 
 func (s *simpleSection) write(w *writer) {
@@ -212,6 +178,18 @@ func (s *compoundSection) read(r *reader) error {
 	}
 	var err error
 	s.offsets, err = readSectionU32(r.r, s.index)
+	return err
+}
+
+func (s *compoundSection) skip(r *reader) error {
+	if err := s.data.skip(r); err != nil {
+		return err
+	}
+	if err := s.index.read(r); err != nil {
+		return err
+	}
+
+	_, err := r.r.Read(s.index.off, s.index.sz)
 	return err
 }
 
