@@ -15,7 +15,7 @@ import (
 	// "github.com/google/go-github/v27/github"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v62/github"
-	"github.com/xvandish/zoekt/gitindex"
+	"github.com/sourcegraph/zoekt/gitindex"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 )

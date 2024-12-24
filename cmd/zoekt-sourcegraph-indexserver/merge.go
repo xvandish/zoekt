@@ -13,7 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/atomic"
 
-	"github.com/xvandish/zoekt"
+	"github.com/sourcegraph/zoekt"
 )
 
 var metricShardMergingRunning = promauto.NewGauge(prometheus.GaugeOpts{

@@ -46,13 +46,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/build"
-	proto "github.com/xvandish/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
-	"github.com/xvandish/zoekt/debugserver"
-	"github.com/xvandish/zoekt/grpc/internalerrs"
-	"github.com/xvandish/zoekt/grpc/messagesize"
-	"github.com/xvandish/zoekt/internal/profiler"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/build"
+	proto "github.com/sourcegraph/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
+	"github.com/sourcegraph/zoekt/debugserver"
+	"github.com/sourcegraph/zoekt/grpc/internalerrs"
+	"github.com/sourcegraph/zoekt/grpc/messagesize"
+	"github.com/sourcegraph/zoekt/internal/profiler"
 )
 
 var (

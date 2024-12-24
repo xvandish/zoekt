@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/query"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/query"
 )
 
 type MockSearcher struct {

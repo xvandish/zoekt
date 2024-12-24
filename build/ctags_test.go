@@ -19,8 +19,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/ctags"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/ctags"
 )
 
 func TestTagsToSections(t *testing.T) {

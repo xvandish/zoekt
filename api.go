@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package zoekt // import "github.com/xvandish/zoekt"
+package zoekt // import "github.com/sourcegraph/zoekt"
 
 import (
 	"context"
@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xvandish/zoekt/query"
+	"github.com/sourcegraph/zoekt/query"
 )
 
 const (

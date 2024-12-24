@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/build"
-	"github.com/xvandish/zoekt/internal/archive"
-	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/shards"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/build"
+	"github.com/sourcegraph/zoekt/internal/archive"
+	"github.com/sourcegraph/zoekt/query"
+	"github.com/sourcegraph/zoekt/shards"
 )
 
 var update = flag.Bool("update", false, "update golden file")
@@ -67,7 +67,7 @@ func TestRanking(t *testing.T) {
 		q("r:cody sourcegraph url", "github.com/sourcegraph/cody/lib/shared/src/sourcegraph-api/graphql/client.ts"),
 
 		// zoekt
-		q("zoekt searcher", "github.com/xvandish/zoekt/api.go"),
+		q("zoekt searcher", "github.com/sourcegraph/zoekt/api.go"),
 
 		// exact phrases
 		q("assets are not configured for this binary", "github.com/sourcegraph/sourcegraph/ui/assets/assets.go"),

@@ -34,9 +34,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/atomic"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/trace"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/query"
+	"github.com/sourcegraph/zoekt/trace"
 )
 
 var (

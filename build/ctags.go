@@ -23,8 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/ctags"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/ctags"
 )
 
 // Make sure all names are lowercase here, since they are normalized

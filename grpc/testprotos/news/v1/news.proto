@@ -11,7 +11,7 @@ package grpc.testprotos.news.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/xvandish/zoekt/grpc/testprotos/news/v1";
+option go_package = "github.com/sourcegraph/zoekt/grpc/testprotos/news/v1";
 
 message Article {
   enum Status {

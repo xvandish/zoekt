@@ -19,11 +19,11 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5"
-	proto "github.com/xvandish/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
-	"github.com/xvandish/zoekt/ctags"
+	proto "github.com/sourcegraph/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
+	"github.com/sourcegraph/zoekt/ctags"
 	"golang.org/x/net/trace"
 
-	"github.com/xvandish/zoekt"
+	"github.com/sourcegraph/zoekt"
 )
 
 // SourcegraphListResult is the return value of Sourcegraph.List. It is its

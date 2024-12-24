@@ -39,7 +39,7 @@ import (
 	"github.com/google/go-github/v62/github"
 	"golang.org/x/oauth2"
 
-	"github.com/xvandish/zoekt/gitindex"
+	"github.com/sourcegraph/zoekt/gitindex"
 )
 
 type topicsFlag []string

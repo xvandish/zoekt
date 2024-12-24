@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/build"
-	"github.com/xvandish/zoekt/ctags"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/build"
+	"github.com/sourcegraph/zoekt/ctags"
 
 	sglog "github.com/sourcegraph/log"
 )

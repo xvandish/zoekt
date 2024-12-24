@@ -27,7 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/xvandish/zoekt/internal/languages"
+	"github.com/sourcegraph/zoekt/internal/languages"
 )
 
 var _ = log.Println

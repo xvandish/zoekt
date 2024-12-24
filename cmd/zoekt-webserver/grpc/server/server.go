@@ -4,13 +4,13 @@ import (
 	"context"
 	"math"
 
-	"github.com/xvandish/zoekt/grpc/chunk"
-	proto "github.com/xvandish/zoekt/grpc/protos/zoekt/webserver/v1"
+	"github.com/sourcegraph/zoekt/grpc/chunk"
+	proto "github.com/sourcegraph/zoekt/grpc/protos/zoekt/webserver/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/query"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/query"
 )
 
 func NewServer(s zoekt.Streamer) *Server {

@@ -3,7 +3,7 @@ package server
 import (
 	"math"
 
-	"github.com/xvandish/zoekt"
+	"github.com/sourcegraph/zoekt"
 )
 
 // newSamplingSender is a zoekt.Sender that samples stats events to avoid

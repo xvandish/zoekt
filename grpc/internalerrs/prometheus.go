@@ -7,7 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/xvandish/zoekt/grpc/grpcutil"
+	"github.com/sourcegraph/zoekt/grpc/grpcutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 )

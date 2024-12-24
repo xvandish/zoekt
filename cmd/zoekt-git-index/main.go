@@ -24,9 +24,9 @@ import (
 
 	"go.uber.org/automaxprocs/maxprocs"
 
-	"github.com/xvandish/zoekt/cmd"
-	"github.com/xvandish/zoekt/ctags"
-	"github.com/xvandish/zoekt/gitindex"
+	"github.com/sourcegraph/zoekt/cmd"
+	"github.com/sourcegraph/zoekt/ctags"
+	"github.com/sourcegraph/zoekt/gitindex"
 )
 
 func run() int {

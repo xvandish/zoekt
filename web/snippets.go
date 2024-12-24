@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/xvandish/zoekt"
+	"github.com/sourcegraph/zoekt"
 )
 
 func (s *Server) formatResults(result *zoekt.SearchResult, query string, localPrint bool) ([]*FileMatch, error) {

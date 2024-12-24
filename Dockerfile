@@ -3,7 +3,7 @@ FROM golang:1.22.2-alpine3.19 AS builder
 RUN apk add --no-cache ca-certificates
 
 ENV CGO_ENABLED=0
-WORKDIR /go/src/github.com/xvandish/zoekt
+WORKDIR /go/src/github.com/sourcegraph/zoekt
 
 # Cache dependencies
 COPY go.mod go.sum ./
@@ -11,7 +11,7 @@ RUN go mod download
 
 COPY . ./
 ARG VERSION
-RUN go install -ldflags "-X github.com/xvandish/zoekt.Version=$VERSION" ./cmd/...
+RUN go install -ldflags "-X github.com/sourcegraph/zoekt.Version=$VERSION" ./cmd/...
 
 FROM rust:alpine3.19 AS rust-builder
 

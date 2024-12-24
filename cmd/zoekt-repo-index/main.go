@@ -40,9 +40,9 @@ import (
 	"strings"
 
 	"github.com/google/slothfs/manifest"
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/build"
-	"github.com/xvandish/zoekt/gitindex"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/build"
+	"github.com/sourcegraph/zoekt/gitindex"
 	"go.uber.org/automaxprocs/maxprocs"
 
 	git "github.com/go-git/go-git/v5"

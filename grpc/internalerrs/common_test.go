@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	newspb "github.com/xvandish/zoekt/grpc/testprotos/news/v1"
+	newspb "github.com/sourcegraph/zoekt/grpc/testprotos/news/v1"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"

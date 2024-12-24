@@ -2,13 +2,13 @@ queryString: zoekt searcher
 query: (and substr:"zoekt" substr:"searcher")
 targetRank: 1
 
-**github.com/xvandish/zoekt/api.go**
+**github.com/sourcegraph/zoekt/api.go**
 824:type Searcher interface {
 15:package zoekt // import "github.com/sourcegraph/zoekt"
 697:	ZoektVersion          string
 hidden 13 more line matches
 
-github.com/xvandish/zoekt/rpc/internal/srv/srv.go
+github.com/sourcegraph/zoekt/rpc/internal/srv/srv.go
 33:type Searcher struct {
 34:	Searcher zoekt.Searcher
 37:func (s *Searcher) Search(ctx context.Context, args *SearchArgs, reply *SearchReply) error {
@@ -32,7 +32,7 @@ github.com/sourcegraph/sourcegraph/internal/search/job/job.go
 75:	SearcherGRPCConnectionCache *defaults.ConnectionCache
 hidden 1 more line matches
 
-github.com/xvandish/zoekt/json/json.go
+github.com/sourcegraph/zoekt/json/json.go
 26:	Searcher zoekt.Searcher
 25:type jsonSearcher struct {
 48:func (s *jsonSearcher) jsonSearch(w http.ResponseWriter, req *http.Request) {

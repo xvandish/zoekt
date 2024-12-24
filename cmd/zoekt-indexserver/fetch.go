@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation"
-	"github.com/xvandish/zoekt/gitindex"
+	"github.com/sourcegraph/zoekt/gitindex"
 	"golang.org/x/sync/errgroup"
 )
 

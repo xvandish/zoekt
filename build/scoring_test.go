@@ -20,10 +20,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/ctags"
-	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/shards"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/ctags"
+	"github.com/sourcegraph/zoekt/query"
+	"github.com/sourcegraph/zoekt/shards"
 )
 
 type scoreCase struct {

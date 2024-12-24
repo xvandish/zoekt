@@ -11,8 +11,8 @@ import (
 	"flag"
 	"log"
 
-	"github.com/xvandish/zoekt/cmd"
-	"github.com/xvandish/zoekt/internal/archive"
+	"github.com/sourcegraph/zoekt/cmd"
+	"github.com/sourcegraph/zoekt/internal/archive"
 	"go.uber.org/automaxprocs/maxprocs"
 )
 

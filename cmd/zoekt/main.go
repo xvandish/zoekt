@@ -26,9 +26,9 @@ import (
 	"time"
 
 	"github.com/felixge/fgprof"
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/shards"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/query"
+	"github.com/sourcegraph/zoekt/shards"
 )
 
 func displayMatches(files []zoekt.FileMatch, pat string, withRepo bool, list bool) {

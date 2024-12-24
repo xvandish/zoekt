@@ -40,8 +40,8 @@ import (
 	"github.com/grafana/regexp"
 	"github.com/rs/xid"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/ctags"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/ctags"
 )
 
 var DefaultDir = filepath.Join(os.Getenv("HOME"), ".zoekt")

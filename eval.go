@@ -26,7 +26,7 @@ import (
 	enry_data "github.com/go-enry/go-enry/v2/data"
 	"github.com/grafana/regexp"
 
-	"github.com/xvandish/zoekt/query"
+	"github.com/sourcegraph/zoekt/query"
 )
 
 // simplifyMultiRepo takes a query and a predicate. It returns Const(true) if all

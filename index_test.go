@@ -27,7 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/grafana/regexp"
 
-	"github.com/xvandish/zoekt/query"
+	"github.com/sourcegraph/zoekt/query"
 )
 
 func clearScores(r *SearchResult) {

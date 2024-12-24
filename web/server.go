@@ -31,9 +31,9 @@ import (
 	"time"
 
 	"github.com/grafana/regexp"
-	"github.com/xvandish/zoekt"
-	zjson "github.com/xvandish/zoekt/json"
-	"github.com/xvandish/zoekt/query"
+	"github.com/sourcegraph/zoekt"
+	zjson "github.com/sourcegraph/zoekt/json"
+	"github.com/sourcegraph/zoekt/query"
 )
 
 var Funcmap = template.FuncMap{

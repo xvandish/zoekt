@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/build"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/build"
 )
 
 func TestMergeMeta(t *testing.T) {

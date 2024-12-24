@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/sourcegraph/log/logtest"
-	proto "github.com/xvandish/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
-	"github.com/xvandish/zoekt/ctags"
+	proto "github.com/sourcegraph/zoekt/cmd/zoekt-sourcegraph-indexserver/protos/sourcegraph/zoekt/configuration/v1"
+	"github.com/sourcegraph/zoekt/ctags"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -23,7 +23,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
-	"github.com/xvandish/zoekt"
+	"github.com/sourcegraph/zoekt"
 )
 
 func TestIterateIndexOptions_Fingerprint(t *testing.T) {

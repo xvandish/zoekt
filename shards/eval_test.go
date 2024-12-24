@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/query"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/query"
 )
 
 func TestSearchTypeRepo(t *testing.T) {

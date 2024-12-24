@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"github.com/opentracing/opentracing-go"
-	"github.com/xvandish/zoekt"
-	"github.com/xvandish/zoekt/query"
-	"github.com/xvandish/zoekt/trace"
+	"github.com/sourcegraph/zoekt"
+	"github.com/sourcegraph/zoekt/query"
+	"github.com/sourcegraph/zoekt/trace"
 )
 
 func NewTraceAwareSearcher(s zoekt.Streamer) zoekt.Streamer {
@@ -15,7 +15,7 @@ func NewTraceAwareSearcher(s zoekt.Streamer) zoekt.Streamer {
 
 // traceAwareSearcher wraps a zoekt.Searcher instance so that the tracing context item is set in the
 // context. This context item toggles on trace collection via the
-// github.com/xvandish/zoekt/trace/ot package.
+// github.com/sourcegraph/zoekt/trace/ot package.
 type traceAwareSearcher struct {
 	Searcher zoekt.Streamer
 }
