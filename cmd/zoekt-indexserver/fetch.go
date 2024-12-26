@@ -136,11 +136,26 @@ func getLookbackWindowStart(repoDir string, fetchInterval time.Duration) (time.T
 
 	return now, lookbackIntervalStart
 }
+
+func isDuringWorkHours(timeToCheck time.Time, startHour, endHour int, zone *time.Location) bool {
+	currHour := timeToCheck.In(zone).Hour()
+	return currHour >= startHour && currHour <= endHour
+}
+func workingHoursEnabled(opts *Options) bool {
+	return opts.workingHoursStart >= 0
+}
+
 func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
-	t := time.NewTicker(opts.fetchInterval)
+	currInterval := opts.fetchInterval
+	if workingHoursEnabled(opts) && !isDuringWorkHours(time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
+		currInterval = opts.fetchIntervalSlow
+		fmt.Printf("not during working hours. Starting interval is %s\n", opts.fetchIntervalSlow)
+	}
+	t := time.NewTicker(currInterval)
 	lastBruteReindex := time.Now()
+
 	for {
-		timeToWrite, lookbackIntervalStart := getLookbackWindowStart(repoDir, opts.fetchInterval)
+		timeToWrite, lookbackIntervalStart := getLookbackWindowStart(repoDir, currInterval)
 		log.Printf("lookbackIntervalStart=%s\n", lookbackIntervalStart.String())
 
 		if time.Since(lastBruteReindex) >= opts.bruteReindexInterval {
@@ -160,6 +175,21 @@ func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepo
 		reposToFetchAndIndex := callGetReposModifiedSinceForCfgs(cfg, lookbackIntervalStart, repoDir)
 		processReposToFetchAndIndex(reposToFetchAndIndex, opts.parallelFetches, pendingRepos)
 		writeFetchTimeToFile(repoDir, timeToWrite)
+
+		// this code has a bit of an issue. If fetchIntervalSlow is much slower, than it's possible
+		// that the entire fetchIntervalSlow elapses before we switch back to the faster fetchInterval.
+		// As I'm planning on using only a 10min slow interval, this is a problem for later.
+		if workingHoursEnabled(opts) {
+			if isDuringWorkHours(time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
+				t.Reset(opts.fetchInterval)
+				currInterval = opts.fetchInterval
+			} else {
+				fmt.Printf("not during working hours. Setting interval to=%s\n", opts.fetchIntervalSlow)
+				t.Reset(opts.fetchIntervalSlow)
+				currInterval = opts.fetchIntervalSlow
+			}
+		}
+
 		<-t.C
 	}
 }
