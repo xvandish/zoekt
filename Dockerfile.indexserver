@@ -14,10 +14,10 @@ RUN mkdir -p ${DATA_DIR}
 
 COPY --from=zoekt \
     /usr/local/bin/universal-* \
-    /usr/local/bin/zoekt-sourcegraph-indexserver \
+    /usr/local/bin/zoekt-indexserver \
     /usr/local/bin/zoekt-archive-index \
     /usr/local/bin/zoekt-git-index \
     /usr/local/bin/zoekt-merge-index \
     /usr/local/bin/
 
-ENTRYPOINT ["/sbin/tini", "--", "zoekt-sourcegraph-indexserver"]
+ENTRYPOINT ["/sbin/tini", "--", "zoekt-indexserver"]
