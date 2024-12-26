@@ -57,19 +57,20 @@ func loggedRun(cmd *exec.Cmd) (out, err []byte) {
 }
 
 type Options struct {
-	cpuFraction         float64
-	cpuCount            int
-	fetchInterval       time.Duration
-	mirrorInterval      time.Duration
-	indexFlagsStr       string
-	indexFlags          []string
-	mirrorConfigFile    string
-	maxLogAge           time.Duration
-	indexTimeout        time.Duration
-	parallelListApiReqs int
-	parallelClones      int
-	parallelFetches     int
-	parallelIndexes     int
+	cpuFraction          float64
+	cpuCount             int
+	fetchInterval        time.Duration
+	mirrorInterval       time.Duration
+	bruteReindexInterval time.Duration
+	indexFlagsStr        string
+	indexFlags           []string
+	mirrorConfigFile     string
+	maxLogAge            time.Duration
+	indexTimeout         time.Duration
+	parallelListApiReqs  int
+	parallelClones       int
+	parallelFetches      int
+	parallelIndexes      int
 }
 
 func (o *Options) validate() {
@@ -94,6 +95,7 @@ func (o *Options) defineFlags() {
 		"", "JSON file holding mirror configuration.")
 
 	flag.DurationVar(&o.mirrorInterval, "mirror_duration", 24*time.Hour, "find and clone new repos at this frequency.")
+	flag.DurationVar(&o.bruteReindexInterval, "brute_reindex_interval", 24*time.Hour, "re-index all repos even if they had no update. Still runs with -incremental by default.")
 	flag.Float64Var(&o.cpuFraction, "cpu_fraction", 0.25,
 		"use this fraction of the cores for indexing.")
 	flag.StringVar(&o.indexFlagsStr, "git_index_flags", "", "space separated list of flags passed through to zoekt-git-index (e.g. -git_index_flags='-symbols=false -submodules=false'")
@@ -107,6 +109,7 @@ func (o *Options) defineFlags() {
 // posted on pendingRepos.
 func periodicFetch(repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
 	t := time.NewTicker(opts.fetchInterval)
+	lastBruteReindex := time.Now()
 	for {
 		repos, err := gitindex.FindGitRepos(repoDir)
 		if err != nil {
@@ -123,6 +126,7 @@ func periodicFetch(repoDir, indexDir string, opts *Options, pendingRepos chan<- 
 		// TODO: Randomize to make sure quota throttling hits everyone.
 		var mu sync.Mutex
 		later := map[string]struct{}{}
+		count := 0
 		for _, dir := range repos {
 			dir := dir
 			g.Go(func() error {
@@ -132,13 +136,21 @@ func periodicFetch(repoDir, indexDir string, opts *Options, pendingRepos chan<- 
 					mu.Unlock()
 				} else {
 					pendingRepos <- dir
+					count += 1
 				}
 				return nil
 			})
 		}
+		fmt.Printf("%d repos had git updates\n", count)
 
-		for r := range later {
-			pendingRepos <- r
+		if time.Since(lastBruteReindex) >= opts.bruteReindexInterval {
+			fmt.Printf("re-indexing the %d repos that had no update\n", len(later))
+			for r := range later {
+				pendingRepos <- r
+			}
+			lastBruteReindex = time.Now()
+		} else {
+			fmt.Printf("not re-indexing the %d repos that had no update. Only been %s since last bruteReindexInterval\n", len(later), time.Since(lastBruteReindex))
 		}
 
 		<-t.C
