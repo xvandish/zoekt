@@ -143,6 +143,7 @@ func main() {
 	}
 	var repos []*github.Repository
 	var err error
+	start := time.Now()
 	if *org != "" {
 		repos, err = getOrgRepos(client, *org, reposFilters)
 	} else if *user != "" {
@@ -151,6 +152,7 @@ func main() {
 		log.Printf("no user or org specified, cloning all repos.")
 		repos, err = getUserRepos(client, "", reposFilters)
 	}
+	log.Printf("took %s to get{}Repos\n", time.Since(start))
 
 	if err != nil {
 		log.Fatal(err)
@@ -278,6 +280,8 @@ func callGithubConcurrently(initialResp *github.Response, concurrencyLimit int, 
 			start := time.Now()
 			s <- true
 			defer w.Done()
+			log.Printf("fetching repos for page=%d org=%s user=%s. Waited for=%s\n", page, org, user, time.Since(start))
+			start = time.Now()
 			var repos []*github.Repository
 			var err error
 			if method == "org" {
