@@ -31,15 +31,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sourcegraph/zoekt"
-	"github.com/sourcegraph/zoekt/gitindex"
-	"golang.org/x/sync/errgroup"
 )
 
 const day = time.Hour * 24
+const iso8601Format = "2006-01-02T15:04:05Z07:00"
 
 var (
 	// we use this for 3 things:
@@ -80,6 +78,7 @@ type Options struct {
 	parallelClones       int
 	parallelFetches      int
 	parallelIndexes      int
+	useSmartGHFetch      bool
 }
 
 func (o *Options) validate() {
@@ -113,6 +112,7 @@ func (o *Options) defineFlags() {
 	flag.IntVar(&o.parallelClones, "parallel_clones", 1, "number of concurrent gitindex/clone operations. Not all mirrors support this flag")
 	flag.IntVar(&o.parallelFetches, "parallel_fetches", 1, "number of concurrent git fetch ops")
 	flag.IntVar(&o.parallelIndexes, "parallel_indexes", 1, "number of concurrent zoekt-git-index ops")
+	flag.BoolVar(&o.useSmartGHFetch, "use_smart_gh_fetch", false, "When enabled, uses the GitHub search api to find which repos to run git fetch on")
 }
 
 func periodicBackup(indexDir, dataDir string, opts *Options) {
@@ -138,79 +138,6 @@ func periodicBackup(indexDir, dataDir string, opts *Options) {
 	}
 }
 
-// periodicFetch runs git-fetch every once in a while. Results are
-// posted on pendingRepos.
-func periodicFetch(repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
-	t := time.NewTicker(opts.fetchInterval)
-	lastBruteReindex := time.Now()
-	for {
-		repos, err := gitindex.FindGitRepos(repoDir)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		if len(repos) == 0 {
-			log.Printf("no repos found under %s", repoDir)
-		}
-
-		g, _ := errgroup.WithContext(context.Background())
-		g.SetLimit(opts.parallelFetches)
-
-		// TODO: Randomize to make sure quota throttling hits everyone.
-		var mu sync.Mutex
-		later := map[string]struct{}{}
-		count := 0
-		for _, dir := range repos {
-			dir := dir
-			g.Go(func() error {
-				ran := muIndexAndDataDirs.With(dir, func() {
-					if hasUpdate := fetchGitRepo(dir); !hasUpdate {
-						mu.Lock()
-						later[dir] = struct{}{}
-						mu.Unlock()
-					} else {
-						pendingRepos <- dir
-						count += 1
-					}
-				})
-				if !ran {
-					log.Printf("either an index or fetch job for repo=%s already running\n", dir)
-				}
-
-				return nil
-			})
-		}
-		log.Printf("%d repos had git updates\n", count)
-
-		if time.Since(lastBruteReindex) >= opts.bruteReindexInterval {
-			log.Printf("re-indexing the %d repos that had no update\n", len(later))
-			for r := range later {
-				pendingRepos <- r
-			}
-			lastBruteReindex = time.Now()
-		} else {
-			log.Printf("not re-indexing the %d repos that had no update. Only been %s since last bruteReindexInterval\n", len(later), time.Since(lastBruteReindex))
-		}
-
-		<-t.C
-	}
-}
-
-// fetchGitRepo runs git-fetch, and returns true if there was an
-// update.
-func fetchGitRepo(dir string) bool {
-	cmd := exec.Command("git", "--git-dir", dir, "fetch", "origin", "--prune")
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("command %s failed: %v\nCOMBINED_OUT: %s\n",
-			cmd.Args, err, string(output))
-		return false
-	}
-	// When fetch found no updates, it prints nothing out
-	return len(output) != 0
-}
-
 // indexPendingRepos consumes the directories on the repos channel and
 // indexes them, sequentially.
 func indexPendingRepos(indexDir, repoDir string, opts *Options, repos <-chan string) {
@@ -222,7 +149,7 @@ func indexPendingRepos(indexDir, repoDir string, opts *Options, repos <-chan str
 					indexPendingRepo(dir, indexDir, repoDir, opts)
 				})
 				if !ran {
-					fmt.Printf("index job for repository: %s already running\n", dir)
+					log.Printf("index job for repository: %s already running\n", dir)
 				}
 
 				// TODO: handle failures better. For now, as this is causing
@@ -381,9 +308,17 @@ func main() {
 		}
 	}
 
-	_, err := readConfigURL(opts.mirrorConfigFile)
+	cfgs, err := readConfigURL(opts.mirrorConfigFile)
 	if err != nil {
 		log.Fatalf("readConfigURL(%s): %v", opts.mirrorConfigFile, err)
+	}
+
+	if opts.useSmartGHFetch {
+		for _, cfg := range cfgs {
+			if !cfg.IsGithubConfig() {
+				log.Fatal("use_smart_gh_fetch is only valid if a config ONLY contains Github configs")
+			}
+		}
 	}
 
 	pendingRepos := make(chan string, 6000)
@@ -392,5 +327,10 @@ func main() {
 	go deleteOrphanIndexes(*indexDir, repoDir, opts.fetchInterval)
 	go periodicBackup(*indexDir, repoDir, &opts)
 	go indexPendingRepos(*indexDir, repoDir, &opts, pendingRepos)
-	periodicFetch(repoDir, *indexDir, &opts, pendingRepos)
+
+	if opts.useSmartGHFetch {
+		periodicSmartGHFetchV2(repoDir, *indexDir, &opts, pendingRepos)
+	} else {
+		periodicFetch(repoDir, *indexDir, &opts, pendingRepos)
+	}
 }
