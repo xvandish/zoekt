@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -225,10 +226,21 @@ func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos c
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("set GITHUB_TOKEN with length=%d\n", len(ghToken))
-		os.Setenv("GITHUB_TOKEN", ghToken)
+		log.Printf("setting global git config token url replacement len=%d\n", len(ghToken))
+		gitUrlReplacement := fmt.Sprintf("url.https://x-access-token:%s@github.com/.insteadof", ghToken)
+		_, err = exec.Command("git", "config", "--global", gitUrlReplacement, "https://github.com/").Output()
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		// remove the token once we're done
-		defer os.Setenv("GITHUB_TOKEN", "")
+		defer func() {
+			log.Printf("unsetting global git config token url replacement\n")
+			_, err := exec.Command("git", "config", "--global", "--unset", gitUrlReplacement, "https://github.com/").Output()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}()
 	}
 
 	g, _ := errgroup.WithContext(context.Background())
