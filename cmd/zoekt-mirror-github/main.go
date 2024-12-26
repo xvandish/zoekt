@@ -33,6 +33,7 @@ import (
 
 	"github.com/google/go-github/v27/github"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sourcegraph/zoekt/gitindex"
 )
@@ -56,6 +57,7 @@ type reposFilters struct {
 
 var (
 	flagMaxConcurrentGHRequests = flag.Int("max-concurrent-gh-requests", 1, "Number of pages of user/org repos that can be fetched concurrently. 1, the default, is syncronous.")
+	flagParallelClone           = flag.Int("parallel_clone", 1, "Number of concurrent git clones ops")
 )
 
 func main() {
@@ -353,35 +355,42 @@ func itoa(p *int) string {
 }
 
 func cloneRepos(destDir string, repos []*github.Repository) error {
+	g, _ := errgroup.WithContext(context.Background())
+	g.SetLimit(*flagParallelClone)
+
 	for _, r := range repos {
-		host, err := url.Parse(*r.HTMLURL)
-		if err != nil {
-			return err
-		}
+		r := r
+		g.Go(func() error {
+			host, err := url.Parse(*r.HTMLURL)
+			if err != nil {
+				return err
+			}
+			config := map[string]string{
+				"zoekt.web-url-type": "github",
+				"zoekt.web-url":      *r.HTMLURL,
+				"zoekt.name":         filepath.Join(host.Hostname(), *r.FullName),
 
-		config := map[string]string{
-			"zoekt.web-url-type": "github",
-			"zoekt.web-url":      *r.HTMLURL,
-			"zoekt.name":         filepath.Join(host.Hostname(), *r.FullName),
+				"zoekt.github-stars":       itoa(r.StargazersCount),
+				"zoekt.github-watchers":    itoa(r.WatchersCount),
+				"zoekt.github-subscribers": itoa(r.SubscribersCount),
+				"zoekt.github-forks":       itoa(r.ForksCount),
 
-			"zoekt.github-stars":       itoa(r.StargazersCount),
-			"zoekt.github-watchers":    itoa(r.WatchersCount),
-			"zoekt.github-subscribers": itoa(r.SubscribersCount),
-			"zoekt.github-forks":       itoa(r.ForksCount),
+				"zoekt.archived": marshalBool(r.Archived != nil && *r.Archived),
+				"zoekt.fork":     marshalBool(r.Fork != nil && *r.Fork),
+				"zoekt.public":   marshalBool(r.Private == nil || !*r.Private),
+			}
+			dest, err := gitindex.CloneRepo(destDir, *r.FullName, *r.CloneURL, config)
+			if err != nil {
+				return err
+			}
+			if dest != "" {
+				fmt.Println(dest)
+			}
+			return nil
 
-			"zoekt.archived": marshalBool(r.Archived != nil && *r.Archived),
-			"zoekt.fork":     marshalBool(r.Fork != nil && *r.Fork),
-			"zoekt.public":   marshalBool(r.Private == nil || !*r.Private),
-		}
-		dest, err := gitindex.CloneRepo(destDir, *r.FullName, *r.CloneURL, config)
-		if err != nil {
-			return err
-		}
-		if dest != "" {
-			fmt.Println(dest)
-		}
-
+		})
 	}
+	g.Wait()
 
 	return nil
 }

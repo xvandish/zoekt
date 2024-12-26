@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -150,7 +151,7 @@ func periodicMirrorFile(repoDir string, opts *Options, pendingRepos chan<- strin
 			lastCfg = cfg
 		}
 
-		executeMirror(lastCfg, repoDir, pendingRepos)
+		executeMirror(lastCfg, repoDir, opts.parallelListApiReqs, opts.parallelClones, pendingRepos)
 
 		select {
 		case <-watcher:
@@ -160,7 +161,7 @@ func periodicMirrorFile(repoDir string, opts *Options, pendingRepos chan<- strin
 	}
 }
 
-func executeMirror(cfg []ConfigEntry, repoDir string, pendingRepos chan<- string) {
+func executeMirror(cfg []ConfigEntry, repoDir string, parallelListApiReqs, parallelClones int, pendingRepos chan<- string) {
 	// Randomize the ordering in which we query
 	// things. This is to ensure that quota limits don't
 	// always hit the last one in the list.
@@ -196,6 +197,8 @@ func executeMirror(cfg []ConfigEntry, repoDir string, pendingRepos chan<- string
 			if c.NoArchived {
 				cmd.Args = append(cmd.Args, "-no_archived")
 			}
+			cmd.Args = append(cmd.Args, "--parallel_clone", strconv.Itoa(parallelClones))
+			cmd.Args = append(cmd.Args, "--max-concurrent-gh-requests", strconv.Itoa(parallelListApiReqs))
 		} else if c.GitilesURL != "" {
 			cmd = exec.Command("zoekt-mirror-gitiles",
 				"-dest", repoDir, "-name", c.Name)
