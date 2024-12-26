@@ -28,7 +28,6 @@ func main() {
 		filepath.Join(os.Getenv("HOME"), ".github-token"),
 		"file holding API token.")
 	forks := flag.Bool("forks", true, "whether to allow forks or not. This DOES NOT mean that only forks are allowed")
-	// deleteRepos := flag.Bool("delete", false, "delete missing repos")
 	namePattern := flag.String("name", "", "only return repos whose name matches the given regexp.")
 	excludePattern := flag.String("exclude", "", "don't return repos whose names match this regexp.")
 	topics := topicsFlag{}
@@ -38,11 +37,10 @@ func main() {
 	noArchived := flag.Bool("no_archived", false, "search and return for only projects that are not archived")
 	parallelSearchReqs := flag.Int("parallel_search_api_reqs", 1, "Number of search requests that can be in flight at the same time. Used to fetch multiple pages of large results at once.")
 
-	since := flag.String("since", "", "an ISOxxx string. Repos returned will be updated at or after this time")
+	since := flag.String("since", "", "an ISO8601 string. Repos returned will be updated at or after this time")
 
 	flag.Parse()
-	// for this org or user, call ListReposBy[] until we see a repo
-	// that has been updated before lastIndex
+
 	if *dest == "" {
 		log.Fatal("must set --dest")
 	}
@@ -109,15 +107,7 @@ func main() {
 		noArchived:    noArchived,
 	}
 	var repos []github.Repository
-	// this is the approximate time we do a search query for updated repos.
-	// the next query will look for repos updated after this time. We only
-	// write this time to file if the query is successfull, in that way we
-	// won't miss updating
-	// I think the parent function should provide the time. This function may be called
-	// multiple times in succession, and we want each to run for the same time period
-	// now := time.Now()
-	// fmt.Println("now:", now)
-	// threeMinsAgo := now.Add(time.Duration(-80) * time.Minute)
+
 	if *org != "" {
 		repos, err = getReposUpdatedAfterLastUpdate(client, "org", *org, *namePattern, reposFilters, sinceTime, *parallelSearchReqs, *forks)
 	} else if *user != "" {
@@ -181,7 +171,7 @@ func fetchPage(client *github.Client, searchQuery string, page int, results chan
 	return nil
 }
 
-func callGithubRepoSearchConcurrently(initialResp *github.Response, concurrencyLimit int, firstResult *github.RepositoriesSearchResult, gClient *github.Client, reposFilters reposFilters, searchQuery string) ([]github.Repository, error) {
+func callGithubRepoSearchConcurrently(initialResp *github.Response, concurrencyLimit int, firstResult *github.RepositoriesSearchResult, gClient *github.Client, searchQuery string) ([]github.Repository, error) {
 	pagesToCall := initialResp.LastPage - 1
 	var reposToUpdate []github.Repository
 	// buffered channel so we don't block without a requisite send
@@ -242,7 +232,7 @@ func getReposUpdatedAfterLastUpdate(client *github.Client, key string, orgOrUser
 		return result.Repositories, nil
 	}
 
-	return callGithubRepoSearchConcurrently(resp, maxParallelSearchReqs, result, client, reposFilters, searchQuery)
+	return callGithubRepoSearchConcurrently(resp, maxParallelSearchReqs, result, client, searchQuery)
 }
 
 // we're going to have to keep track of both updatedAt and pushedAt

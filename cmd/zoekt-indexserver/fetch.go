@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xvandish/zoekt/gitindex"
+	"github.com/sourcegraph/zoekt/gitindex"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -43,7 +43,6 @@ func callGetReposModifiedSinceForCfgs(cfgs []ConfigEntry, lookbackInterval time.
 				continue
 			}
 			reposToFetchAndIndex = append(reposToFetchAndIndex, string(fn))
-			// pendingRepos <- string(fn)
 			reposPushed += 1
 		}
 		fmt.Printf("%v - there are %d repos to fetch and index\n", cmd.Args, reposPushed)
