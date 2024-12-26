@@ -1,7 +1,7 @@
 on:
   push:
     branches:
-      - main
+      - upstream-main
   pull_request:
   workflow_dispatch:
 name: CI
@@ -119,14 +119,26 @@ jobs:
   # We build a shared docker image called "zoekt". This is not pushed, but is
   # used for creating the indexserver and webserver images.
   docker:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/upstream-main'
     runs-on: ubuntu-latest
     needs:
       - "test"
       - "shellcheck"
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
     steps:
       - name: checkout
         uses: actions/checkout@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: version
         id: version
@@ -137,7 +149,7 @@ jobs:
         uses: docker/metadata-action@v3
         with:
           images: |
-            sourcegraph/zoekt-webserver
+            ${{github.repository_owner }}/zoekt-webserver
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -148,7 +160,7 @@ jobs:
         uses: docker/metadata-action@v3
         with:
           images: |
-            sourcegraph/zoekt-indexserver
+            ${{ github.repository_owner }}/zoekt-indexserver
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -163,26 +175,16 @@ jobs:
           push: "false"
           build-args: VERSION=${{ steps.version.outputs.value }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: build-push-webserver
         uses: docker/build-push-action@v4
         with:
-          context: .
-          tags: sourcegraph/zoekt-webserver:${{ steps.version.outputs.value }}, ${{ steps.meta-webserver.outputs.tags }}, sourcegraph/zoekt-webserver:latest
+          outputs: "type=registry,push=true"
+          tags: ghcr.io/${{ github.repository_owner }}/zoekt-webserver:${{ steps.version.outputs.value }},ghcr.io/${{ github.repository_owner }}/zoekt-webserver:latest
           file: Dockerfile.webserver
-          cache-from: sourcegraph/zoekt-webserver:latest
-          push: true
 
       - name: build-push-indexserver
         uses: docker/build-push-action@v4
         with:
-          context: .
-          tags: sourcegraph/zoekt-indexserver:${{ steps.version.outputs.value }}, ${{ steps.meta-indexserver.outputs.tags }}, sourcegraph/zoekt-indexserver:latest
+          outputs: "type=registry,push=true"
+          tags: ghcr.io/${{ github.repository_owner }}/zoekt-indexserver:${{ steps.version.outputs.value }},ghcr.io/${{ github.repository_owner }}/zoekt-indexserver:latest
           file: Dockerfile.indexserver
-          cache-from: sourcegraph/zoekt-indexserver:latest
-          push: true
