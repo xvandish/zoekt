@@ -69,6 +69,7 @@ type Options struct {
 	parallelListApiReqs int
 	parallelClones      int
 	parallelFetches     int
+	parallelIndexes     int
 }
 
 func (o *Options) validate() {
@@ -99,6 +100,7 @@ func (o *Options) defineFlags() {
 	flag.IntVar(&o.parallelListApiReqs, "parallel_list_api_reqs", 1, "number of concurrent list apis reqs to fetch org/user repos. Not all mirrors support this flag")
 	flag.IntVar(&o.parallelClones, "parallel_clones", 1, "number of concurrent gitindex/clone operations. Not all mirrors support this flag")
 	flag.IntVar(&o.parallelFetches, "parallel_fetches", 1, "number of concurrent git fetch ops")
+	flag.IntVar(&o.parallelIndexes, "parallel_indexes", 1, "number of concurrent zoekt-git-index ops")
 }
 
 // periodicFetch runs git-fetch every once in a while. Results are
@@ -161,18 +163,25 @@ func fetchGitRepo(dir string) bool {
 // indexPendingRepos consumes the directories on the repos channel and
 // indexes them, sequentially.
 func indexPendingRepos(indexDir, repoDir string, opts *Options, repos <-chan string) {
-	for dir := range repos {
-		indexPendingRepo(dir, indexDir, repoDir, opts)
-
-		// Failures (eg. timeout) will leave temp files
-		// around. We have to clean them, or they will fill up the indexing volume.
-		if failures, err := filepath.Glob(filepath.Join(indexDir, "*.tmp")); err != nil {
-			log.Printf("Glob: %v", err)
-		} else {
-			for _, f := range failures {
-				os.Remove(f)
+	// set up n listeners on the channel
+	for i := 0; i < opts.parallelIndexes; i++ {
+		go func(r <-chan string) {
+			for dir := range r {
+				// TODO: protect against duplicate operations. E.g, the index
+				// being indexed by some other process already. Use
+				// sourcegraph-indexserver/mutex?
+				indexPendingRepo(dir, indexDir, repoDir, opts)
+				// Failures (eg. timeout) will leave temp files
+				// around. We have to clean them, or they will fill up the indexing volume.
+				if failures, err := filepath.Glob(filepath.Join(indexDir, "*.tmp")); err != nil {
+					log.Printf("Glob: %v", err)
+				} else {
+					for _, f := range failures {
+						os.Remove(f)
+					}
+				}
 			}
-		}
+		}(repos)
 	}
 }
 
