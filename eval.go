@@ -382,11 +382,13 @@ nextFileMatch:
 		d.scoreFilesUsingBM25(res.Files, tfs, df, opts)
 	}
 
-	for _, md := range d.repoMetaData {
-		r := md
-		addRepo(&res, &r)
-		for _, v := range r.SubRepoMap {
-			addRepo(&res, v)
+	if !opts.ExcludeRepoURLsAndLineFragments {
+		for _, md := range d.repoMetaData {
+			r := md
+			addRepo(&res, &r)
+			for _, v := range r.SubRepoMap {
+				addRepo(&res, v)
+			}
 		}
 	}
 
