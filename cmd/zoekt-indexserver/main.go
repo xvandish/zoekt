@@ -85,6 +85,9 @@ type Options struct {
 	// time.Location
 	workingHoursZoneStr string
 	workingHoursZone    *time.Location
+	appPK               string
+	appID               int64
+	appInstallID        int64
 }
 
 func (o *Options) validate() {
@@ -116,6 +119,12 @@ func (o *Options) validate() {
 			log.Fatal("you must set a location if using working_hours. See time.Location for valid locations")
 		}
 	}
+
+	if o.appPK != "" {
+		if o.appID == -1 || o.appInstallID == -1 {
+			log.Fatal("appID and appInstallID must be provided to use a github app")
+		}
+	}
 }
 
 func (o *Options) defineFlags() {
@@ -140,6 +149,9 @@ func (o *Options) defineFlags() {
 	flag.IntVar(&o.workingHoursStart, "working_hours_start", -1, "The start of working hours in 24 hour representation. E.g 9 for 9AM and 17 for 5pm. If set to a non-negative value, it will be used, along with working_hours_end, to decide between fetchInterval or fetchIntervalSlow")
 	flag.IntVar(&o.workingHoursEnd, "working_hours_end", -1, "The end of working hours in 24 hour format. E.g 9 for 9AM and 17 for 5PM. If set to a non-negative value, it will be used, along with working_hours_start, to decide between fetchInterval and fetchIntervalSlow")
 	flag.StringVar(&o.workingHoursZoneStr, "working_hours_zone", "America/NYC", "A time.Location string to set work location")
+	flag.StringVar(&o.appPK, "app-pk", "", "The filepath of a GitHub App PrivateKey. Used to create installation tokens to interact with the API")
+	flag.Int64Var(&o.appID, "app-id", -1, "The ID of the GithubAP")
+	flag.Int64Var(&o.appInstallID, "app-install-id", -1, "The installation ID of the GitHub app")
 }
 
 func periodicBackup(indexDir, dataDir string, opts *Options) {

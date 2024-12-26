@@ -155,7 +155,7 @@ func periodicMirrorFile(repoDir string, opts *Options, pendingRepos chan<- strin
 			lastCfg = cfg
 		}
 
-		executeMirror(lastCfg, repoDir, opts.parallelListApiReqs, opts.parallelClones, pendingRepos)
+		executeMirror(lastCfg, repoDir, opts, pendingRepos)
 
 		select {
 		case <-watcher:
@@ -196,7 +196,7 @@ func createGithubArgsMirrorAndFetchArgs(c ConfigEntry) []string {
 	return args
 }
 
-func executeMirror(cfg []ConfigEntry, repoDir string, parallelListApiReqs, parallelClones int, pendingRepos chan<- string) {
+func executeMirror(cfg []ConfigEntry, repoDir string, opts *Options, pendingRepos chan<- string) {
 	// Randomize the ordering in which we query
 	// things. This is to ensure that quota limits don't
 	// always hit the last one in the list.
@@ -207,8 +207,13 @@ func executeMirror(cfg []ConfigEntry, repoDir string, parallelListApiReqs, paral
 			cmd = exec.Command("zoekt-mirror-github",
 				"-dest", repoDir, "-delete")
 			cmd.Args = append(cmd.Args, createGithubArgsMirrorAndFetchArgs(c)...)
-			cmd.Args = append(cmd.Args, "--parallel_clone", strconv.Itoa(parallelClones))
-			cmd.Args = append(cmd.Args, "--max-concurrent-gh-requests", strconv.Itoa(parallelListApiReqs))
+			cmd.Args = append(cmd.Args, "--parallel_clone", strconv.Itoa(opts.parallelClones))
+			cmd.Args = append(cmd.Args, "--max-concurrent-gh-requests", strconv.Itoa(opts.parallelListApiReqs))
+			if opts.appPK != "" {
+				cmd.Args = append(cmd.Args, "--app-pk", opts.appPK)
+				cmd.Args = append(cmd.Args, "--app-id", strconv.FormatInt(opts.appID, 10))
+				cmd.Args = append(cmd.Args, "--app-install-id", strconv.FormatInt(opts.appInstallID, 10))
+			}
 		} else if c.GitilesURL != "" {
 			cmd = exec.Command("zoekt-mirror-gitiles",
 				"-dest", repoDir, "-name", c.Name)

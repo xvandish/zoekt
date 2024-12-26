@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -34,7 +34,7 @@ func (m *indexMutex) With(repoName string, f func()) bool {
 	return true
 }
 func (m *indexMutex) Global(f func()) {
-	fmt.Printf("in Global\n")
+	log.Printf("in Global\n")
 	m.indexMu.Lock()
 	defer m.indexMu.Unlock()
 	f()
@@ -42,10 +42,10 @@ func (m *indexMutex) Global(f func()) {
 
 // Aquires a global lock, then waits until running is empty
 func (m *indexMutex) GlobalWaitForPending(f func()) {
-	fmt.Printf("in globalWaitForPending, waiting for lock\n")
+	log.Printf("in globalWaitForPending, waiting for lock\n")
 	m.indexMu.Lock()
 	defer m.indexMu.Unlock()
-	fmt.Printf("waiting for m.running to be empty...\n")
+	log.Printf("waiting for m.running to be empty...\n")
 	start := time.Now()
 	for {
 		t := time.NewTicker(time.Second * 1)
@@ -56,6 +56,6 @@ func (m *indexMutex) GlobalWaitForPending(f func()) {
 		}
 		<-t.C
 	}
-	fmt.Printf("m.running empty (waited %s), proceeding with Global f()\n", time.Since(start))
+	log.Printf("m.running empty (waited %s), proceeding with Global f()\n", time.Since(start))
 	f()
 }

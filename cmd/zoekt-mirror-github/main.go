@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v27/github"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
@@ -68,6 +70,9 @@ func main() {
 	token := flag.String("token",
 		filepath.Join(os.Getenv("HOME"), ".github-token"),
 		"file holding API token.")
+	appPK := flag.String("app-pk", "", "The filepath of a GitHub App PrivateKey. Used to create installation tokens to interact with the API")
+	appID := flag.Int64("app-id", -1, "The ID of the GithubAP")
+	appInstallID := flag.Int64("app-install-id", -1, "The installation ID of the GitHub app")
 	forks := flag.Bool("forks", false, "also mirror forks.")
 	deleteRepos := flag.Bool("delete", false, "delete missing repos")
 	namePattern := flag.String("name", "", "only clone repos whose name matches the given regexp.")
@@ -136,6 +141,26 @@ func main() {
 		}
 	}
 
+	var appInstallToken string
+	if *appPK != "" {
+		log.Println("configuring mirroring to use GitHub App")
+		if *appID == -1 || *appInstallID == -1 {
+			log.Fatal("app-id and app-install-id must be set to use a github app")
+		}
+		itr, err := ghinstallation.NewKeyFromFile(http.DefaultTransport, *appID, *appInstallID, *appPK)
+		if err != nil {
+			log.Fatal(err)
+		}
+		client = github.NewClient(&http.Client{Transport: itr})
+		appInstallToken, err = itr.Token(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("set GITHUB_TOKEN with length=%d\n", len(appInstallToken))
+		os.Setenv("GITHUB_TOKEN", appInstallToken)
+		defer os.Setenv("GITHUB_TOKEN", "")
+	}
+
 	reposFilters := reposFilters{
 		topics:        topics,
 		excludeTopics: excludeTopics,
@@ -183,6 +208,9 @@ func main() {
 		repos = trimmed
 	}
 
+	log.Printf("before cloneRepos there are %d repos", len(repos))
+
+	// git clones will use the GITHUB_TOKEN set on env in the case of GitHub apps
 	if err := cloneRepos(destDir, repos); err != nil {
 		log.Fatalf("cloneRepos: %v", err)
 	}

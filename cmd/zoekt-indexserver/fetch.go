@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/sourcegraph/zoekt/gitindex"
 	"golang.org/x/sync/errgroup"
 )
@@ -22,7 +23,7 @@ func periodicFetch(repoDir, indexDir string, opts *Options, pendingRepos chan<- 
 	t := time.NewTicker(opts.fetchInterval)
 	lastBruteReindex := time.Now()
 	for {
-		fmt.Printf("starting periodicFetch\n")
+		log.Printf("starting periodicFetch\n")
 		lastBruteReindex = gitFetchNeededRepos(repoDir, indexDir, opts, pendingRepos, lastBruteReindex)
 		<-t.C
 	}
@@ -45,7 +46,7 @@ func callGetReposModifiedSinceForCfgs(cfgs []ConfigEntry, lookbackInterval time.
 			reposToFetchAndIndex = append(reposToFetchAndIndex, string(fn))
 			reposPushed += 1
 		}
-		fmt.Printf("%v - there are %d repos to fetch and index\n", cmd.Args, reposPushed)
+		log.Printf("%v - there are %d repos to fetch and index\n", cmd.Args, reposPushed)
 	}
 	return reposToFetchAndIndex
 }
@@ -57,14 +58,14 @@ func processReposToFetchAndIndex(reposToFetchAndIndex []string, parallelFetches 
 		g.Go(func() error {
 			ran := muIndexAndDataDirs.With(dir, func() {
 				if hasUpdate := fetchGitRepo(dir); !hasUpdate {
-					fmt.Printf("ERROR: we mistakenly thought %s had an update. Check smartGH logic\n", dir)
+					log.Printf("ERROR: we mistakenly thought %s had an update. Check smartGH logic\n", dir)
 				} else {
-					fmt.Printf("dir=%s has update\n", dir)
+					log.Printf("dir=%s has update\n", dir)
 					pendingRepos <- dir
 				}
 			})
 			if !ran {
-				fmt.Printf("either an index or fetch job for repo=%s already running\n", dir)
+				log.Printf("either an index or fetch job for repo=%s already running\n", dir)
 			}
 			return nil
 		})
@@ -81,20 +82,20 @@ func writeFetchTimeToFile(repoDir string, t time.Time) {
 	f := filepath.Join(repoDir, "time-of-last-update.txt")
 	err := os.WriteFile(f, []byte(t.Format(iso8601Format)), 0644)
 	if err != nil {
-		fmt.Printf("error writing time to file: %v\n", err)
+		log.Printf("error writing time to file: %v\n", err)
 	}
 }
 func readFetchTimeFromFile(repoDir string) (time.Time, error) {
 	f := filepath.Join(repoDir, "time-of-last-update.txt")
 	bytes, err := os.ReadFile(f)
 	if err != nil {
-		fmt.Printf("error reading fetchTime from file: %v\n", err)
+		log.Printf("error reading fetchTime from file: %v\n", err)
 		return time.Time{}, err
 	}
 	lastLookbackIntervalStart := strings.TrimSpace(string(bytes))
 	p, err := time.Parse(iso8601Format, lastLookbackIntervalStart)
 	if err != nil {
-		fmt.Printf("error reading fetchTime from file: %v\n", err)
+		log.Printf("error reading fetchTime from file: %v\n", err)
 		return time.Time{}, err
 	}
 	return p, nil
@@ -149,7 +150,7 @@ func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepo
 	currInterval := opts.fetchInterval
 	if workingHoursEnabled(opts) && !isDuringWorkHours(time.Now(), opts.workingHoursStart, opts.workingHoursEnd, opts.workingHoursZone) {
 		currInterval = opts.fetchIntervalSlow
-		fmt.Printf("not during working hours. Starting interval is %s\n", opts.fetchIntervalSlow)
+		log.Printf("not during working hours. Starting interval is %s\n", opts.fetchIntervalSlow)
 	}
 	t := time.NewTicker(currInterval)
 	lastBruteReindex := time.Now()
@@ -167,7 +168,7 @@ func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepo
 		cfg, err := readConfigURL(opts.mirrorConfigFile)
 		if err != nil {
 			// we'd have a lot of problems anyways, so just error out
-			fmt.Printf("ERROR: can't read configUrl: %v\n", err)
+			log.Printf("ERROR: can't read configUrl: %v\n", err)
 			continue
 		}
 
@@ -184,7 +185,7 @@ func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepo
 				t.Reset(opts.fetchInterval)
 				currInterval = opts.fetchInterval
 			} else {
-				fmt.Printf("not during working hours. Setting interval to=%s\n", opts.fetchIntervalSlow)
+				log.Printf("not during working hours. Setting interval to=%s\n", opts.fetchIntervalSlow)
 				t.Reset(opts.fetchIntervalSlow)
 				currInterval = opts.fetchIntervalSlow
 			}
@@ -195,7 +196,7 @@ func periodicSmartGHFetchV2(repoDir, indexDir string, opts *Options, pendingRepo
 }
 
 func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos chan<- string, lastBruteReindex time.Time) time.Time {
-	fmt.Printf("running gitFetchNeededRepos\n")
+	log.Printf("running gitFetchNeededRepos\n")
 	repos, err := gitindex.FindGitRepos(repoDir)
 	if err != nil {
 		log.Println(err)
@@ -204,8 +205,32 @@ func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos c
 	if len(repos) == 0 {
 		log.Printf("no repos found under %s", repoDir)
 	} else {
-		fmt.Printf("found %d repos to fetch with %d workers\n", len(repos), opts.parallelFetches)
+		log.Printf("found %d repos to fetch with %d workers\n", len(repos), opts.parallelFetches)
 	}
+
+	// use a GitHub app for authentication, if provided
+	var ghToken string
+	if opts.appPK != "" {
+		log.Printf("using GitHub APP to fetch repos\n")
+		itr, err := ghinstallation.NewKeyFromFile(http.DefaultTransport, opts.appID, opts.appInstallID, opts.appPK)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// to avoid some complexity, we generate a single token and hope that it
+		// does not expire before all fetches are done. Expiry time is 1 hour.
+		// If this begins to fail, Token() can be called before every fetch, with
+		// some protection to make sure the backing refresh of the token is not
+		// concurrently called.
+		ghToken, err = itr.Token(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("set GITHUB_TOKEN with length=%d\n", len(ghToken))
+		os.Setenv("GITHUB_TOKEN", ghToken)
+		// remove the token once we're done
+		defer os.Setenv("GITHUB_TOKEN", "")
+	}
+
 	g, _ := errgroup.WithContext(context.Background())
 	g.SetLimit(opts.parallelFetches)
 	// TODO: Randomize to make sure quota throttling hits everyone.
@@ -221,27 +246,27 @@ func gitFetchNeededRepos(repoDir, indexDir string, opts *Options, pendingRepos c
 					later[dir] = struct{}{}
 					mu.Unlock()
 				} else {
-					fmt.Printf("dir=%s has update\n", dir)
+					log.Printf("dir=%s has update\n", dir)
 					pendingRepos <- dir
 					count += 1
 				}
 			})
 			if !ran {
-				fmt.Printf("either an index or fetch job for repo=%s already running\n", dir)
+				log.Printf("either an index or fetch job for repo=%s already running\n", dir)
 			}
 			return nil
 		})
 	}
 	g.Wait()
-	fmt.Printf("%d repos had git updates\n", count)
+	log.Printf("%d repos had git updates\n", count)
 	if time.Since(lastBruteReindex) >= opts.bruteReindexInterval {
-		fmt.Printf("re-indexing the %d repos that had no update\n", len(later))
+		log.Printf("re-indexing the %d repos that had no update\n", len(later))
 		for r := range later {
 			pendingRepos <- r
 		}
 		lastBruteReindex = time.Now()
 	} else {
-		fmt.Printf("not re-indexing the %d repos that had no update\n", len(later))
+		log.Printf("not re-indexing the %d repos that had no update\n", len(later))
 	}
 	return lastBruteReindex
 }
