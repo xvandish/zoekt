@@ -1052,6 +1052,8 @@ func (s *SearchOptions) String() string {
 		add("SpanContext."+k, strconv.Quote(v))
 	}
 
+	addBool("ExcludeRepoURLsAndLineFragments", s.ExcludeRepoURLsAndLineFragments)
+
 	b.WriteByte('}')
 	return b.String()
 }
