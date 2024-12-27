@@ -88,6 +88,8 @@ type Options struct {
 	appPK               string
 	appID               int64
 	appInstallID        int64
+	backupDirIndex      string
+	backupDirGit        string
 }
 
 func (o *Options) validate() {
@@ -152,6 +154,8 @@ func (o *Options) defineFlags() {
 	flag.StringVar(&o.appPK, "app-pk", "", "The filepath of a GitHub App PrivateKey. Used to create installation tokens to interact with the API")
 	flag.Int64Var(&o.appID, "app-id", -1, "The ID of the GithubAP")
 	flag.Int64Var(&o.appInstallID, "app-install-id", -1, "The installation ID of the GitHub app")
+	flag.StringVar(&o.backupDirIndex, "bk-dir-index", "", "dir for index file backup/init")
+	flag.StringVar(&o.backupDirGit, "bk-dir-git", "", "dir for git dirs backup/init")
 }
 
 func periodicBackup(indexDir, dataDir string, opts *Options) {
@@ -175,6 +179,24 @@ func periodicBackup(indexDir, dataDir string, opts *Options) {
 		})
 		<-t.C
 	}
+}
+
+func initFromBackups(indexDir, dataDir, bkIndexDir, bkDataDir string) {
+	log.Printf("attempting to initialize from backups")
+	if bkIndexDir != "" {
+		idxSyncCmd := exec.Command("rsync", "-ruv", bkIndexDir+"/", indexDir+"/")
+		stdout, stderr := loggedRun(idxSyncCmd)
+		log.Print(stdout)
+		log.Print(stderr)
+	}
+
+	if bkDataDir != "" {
+		gitSyncCmd := exec.Command("rsync", "-ruv", bkDataDir+"/", dataDir+"/")
+		stdout, stderr := loggedRun(gitSyncCmd)
+		log.Print(stdout)
+		log.Print(stderr)
+	}
+	log.Printf("\tDONE\n")
 }
 
 // indexPendingRepos consumes the directories on the repos channel and
@@ -358,6 +380,11 @@ func main() {
 				log.Fatal("use_smart_gh_fetch is only valid if a config ONLY contains Github configs")
 			}
 		}
+	}
+
+	// no need to lock, nothing else is doing work
+	if opts.backupDirIndex != "" || opts.backupDirGit != "" {
+		initFromBackups(*indexDir, *dataDir, opts.backupDirIndex, opts.backupDirGit)
 	}
 
 	pendingRepos := make(chan string, 6000)
