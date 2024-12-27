@@ -384,7 +384,7 @@ func main() {
 
 	// no need to lock, nothing else is doing work
 	if opts.backupDirIndex != "" || opts.backupDirGit != "" {
-		initFromBackups(*indexDir, *dataDir, opts.backupDirIndex, opts.backupDirGit)
+		initFromBackups(*indexDir, repoDir, opts.backupDirIndex, opts.backupDirGit)
 	}
 
 	pendingRepos := make(chan string, 6000)
