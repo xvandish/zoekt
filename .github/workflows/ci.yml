@@ -188,3 +188,14 @@ jobs:
           outputs: "type=registry,push=true"
           tags: ghcr.io/${{ github.repository_owner }}/zoekt-indexserver:${{ steps.version.outputs.value }},ghcr.io/${{ github.repository_owner }}/zoekt-indexserver:latest
           file: Dockerfile.indexserver
+      
+      - name: build-push-fileviewer
+        uses: docker/build-push-action@v4
+        with:
+          outputs: "type=registry,push=true"
+          tags: ghcr.io/${{ github.repository_owner }}/zoekt-fileviewer:${{ steps.version.outputs.value }},ghcr.io/${{ github.repository_owner }}/zoekt-fileviewer:latest
+          file: Dockerfile.fileviewer
+
+      - name: verify-templates-folder
+        run: |
+            docker run --rm zoekt-fileviewer:${{ steps.version.outputs.value }} ls /usr/local/bin/templates

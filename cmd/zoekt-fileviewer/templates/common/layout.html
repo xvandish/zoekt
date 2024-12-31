@@ -1,0 +1,41 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <title>{{.Title}}</title>
+    {{linkTag .Nonce "shortcut icon" "/assets/img/favicon.ico" .AssetHashes}}
+    {{linkTag .Nonce "stylesheet" "/assets/css/codesearch.min.css" .AssetHashes}}
+    {{if .ScriptData}}
+    <script{{.Nonce}}>
+      window.scriptData = {{.ScriptData}};
+    </script>
+    {{end}}
+    {{if .ScriptName}}
+    <script{{.Nonce}}>
+      window.page = {{.ScriptName}};
+    </script>
+    {{end}}
+    {{scriptTag .Nonce "/assets/js/bundle_new.js" .AssetHashes}}
+
+    <link{{.Nonce}} rel="search" type="application/opensearchdescription+xml" href="/opensearch.xml" title="The New York Times Codesearch" />
+  </head>
+  <body>
+    {{if .IncludeHeader}}
+    <div id='header'>
+        <ul>
+          <li><a href="/">search</a></li>
+          <li><a href="/about">about</a></li>
+          <li><a href="https://github.com/xvandish/livegrep">source</a></li>
+        </ul>
+        <h1 style="font-weight:500;">
+          The New York Times Codesearch
+        </h1>
+    </div>
+    {{end}}
+    {{block "body" .}}{{end}}
+    {{if .Config.FooterHTML}}
+      {{.Config.FooterHTML}}
+    {{end}}
+  </body>
+</html>
+{{end}}
