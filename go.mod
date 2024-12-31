@@ -4,8 +4,10 @@ require (
 	cloud.google.com/go/profiler v0.4.1
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20230811130428-ced1acdcaa24
 	github.com/RoaringBitmap/roaring v1.9.4
+	github.com/alecthomas/chroma v0.10.0
 	github.com/andygrunwald/go-gerrit v0.0.0-20240524171439-0983e87949db
 	github.com/bmatcuk/doublestar v1.3.4
+	github.com/bradleyfalzon/ghinstallation/v2 v2.12.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/felixge/fgprof v0.9.5
 	github.com/fsnotify/fsnotify v1.7.0
@@ -15,7 +17,9 @@ require (
 	github.com/gobwas/glob v0.2.3
 	github.com/google/go-cmp v0.6.0
 	github.com/google/go-github/v27 v27.0.6
+	github.com/google/go-github/v62 v62.0.0
 	github.com/google/slothfs v0.0.0-20190717100203-59c1163fd173
+	github.com/gorilla/mux v1.8.1
 	github.com/grafana/regexp v0.0.0-20240607082908-2cb410fa05da
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.0.1
@@ -48,20 +52,20 @@ require (
 	go.opentelemetry.io/otel/trace v1.29.0
 	go.uber.org/atomic v1.11.0
 	go.uber.org/automaxprocs v1.5.3
-	golang.org/x/net v0.29.0
+	golang.org/x/net v0.33.0
 	golang.org/x/oauth2 v0.23.0
-	golang.org/x/sync v0.8.0
-	golang.org/x/sys v0.25.0
+	golang.org/x/sync v0.10.0
+	golang.org/x/sys v0.28.0
 	google.golang.org/grpc v1.66.1
 	google.golang.org/protobuf v1.34.2
 )
 
 require (
-	github.com/bradleyfalzon/ghinstallation/v2 v2.12.0 // indirect
+	github.com/bmizerany/pat v0.0.0-20210406213842-e4b6760bdd6f // indirect
 	github.com/davidmz/go-pageant v1.0.2 // indirect
+	github.com/dlclark/regexp2 v1.4.0 // indirect
 	github.com/go-fed/httpsig v1.1.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.1 // indirect
-	github.com/google/go-github/v62 v62.0.0 // indirect
 	github.com/google/go-github/v66 v66.0.0 // indirect
 	github.com/hashicorp/go-version v1.6.0 // indirect
 )
@@ -134,8 +138,8 @@ require (
 	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.27.0 // indirect
-	golang.org/x/text v0.18.0 // indirect
+	golang.org/x/crypto v0.31.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/time v0.6.0 // indirect
 	golang.org/x/tools v0.25.0 // indirect
 	google.golang.org/api v0.196.0 // indirect
