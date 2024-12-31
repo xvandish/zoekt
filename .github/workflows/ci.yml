@@ -198,4 +198,4 @@ jobs:
 
       - name: verify-templates-folder
         run: |
-            docker run --rm zoekt-fileviewer:${{ steps.version.outputs.value }} ls /usr/local/bin/templates
+            docker run --rm zoekt-fileviewer ls /usr/local/bin/templates
