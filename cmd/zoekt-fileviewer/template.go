@@ -458,7 +458,6 @@ func getFuncs() map[string]interface{} {
 }
 
 func LoadTemplates(base string, templates map[string]*template.Template) error {
-	log.Printf("in LoadTemplates\n")
 	pattern := base + "/templates/common/*.html"
 	common := template.New("").Funcs(getFuncs())
 	common = template.Must(common.ParseGlob(pattern))

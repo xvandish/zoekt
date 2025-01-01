@@ -20,6 +20,7 @@ import (
 var (
 	zoektRepoCache = flag.String("zoekt-repo-cache", "", "path to zoekt bare git repos")
 	listen         = flag.String("listen", ":8080", "listen on this address.")
+	docRoot        = flag.String("doc-root", "", "where to find runtime files")
 )
 
 const (
@@ -40,11 +41,14 @@ func main() {
 	if *zoektRepoCache == "" {
 		log.Fatal("--zoekt-repo-cache is required")
 	}
+	if *docRoot == "" {
+		log.Fatal("--doc-root is required")
+	}
 
 	// Create server configuration
 	cfg := &config{
 		ZoektRepoCache: *zoektRepoCache,
-		DocRoot:        ".",
+		DocRoot:        *docRoot,
 		ReadTimeout:    30 * time.Second,
 		WriteTimeout:   30 * time.Second,
 		Port:           *listen,

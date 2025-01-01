@@ -5,8 +5,11 @@ RUN apk add --no-cache ca-certificates bind-tools tini
 # We copy from the locally built zoekt image
 COPY --from=zoekt /usr/local/bin/zoekt-fileviewer /usr/local/bin/
 
+# Create the /app directory
+RUN mkdir -p /app
+
 # Copy the templates folder
-COPY cmd/zoekt-fileviewer/templates /usr/local/bin/templates
+COPY cmd/zoekt-fileviewer/templates /app/templates
 
 # zoekt-webserver has a large stable heap size (10s of gigs), and as such the
 # default GOGC=100 could be better tuned. https://dave.cheney.net/tag/gogc
