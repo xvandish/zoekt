@@ -1,6 +1,7 @@
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates bind-tools tini
+RUN apk add --no-cache ca-certificates bind-tools tini git jansson
+
 
 # We copy from the locally built zoekt image
 COPY --from=zoekt /usr/local/bin/zoekt-fileviewer /usr/local/bin/
