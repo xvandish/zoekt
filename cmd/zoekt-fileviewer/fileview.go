@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -190,6 +191,15 @@ func gitCatBlob(obj string, repoPath string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+func gitCatBlobDirect(obj string, repoPath string, w io.Writer) error {
+	cmd := exec.Command("git", "-C", repoPath, "cat-file", "blob", obj)
+	cmd.Stdout = w
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // used to get the "real" name of "HEAD"
@@ -1188,6 +1198,20 @@ func GitBlameBlob(relativePath string, repo RepoConfig, commit string) (*BlameRe
 }
 
 var fileDoesNotExistError = errors.New("This file does not exist at this point in history")
+
+func GetPlainBlob(relativePath, repoPath, repoName, commit string, w io.Writer) error {
+	commitHash := commit
+	out, err := gitCommitHash(commit, repoPath)
+	if err == nil {
+		commitHash = out[:strings.Index(out, "\n")]
+	}
+	cleanPath := path.Clean(relativePath)
+	if cleanPath == "." {
+		cleanPath = ""
+	}
+	obj := commitHash + ":" + cleanPath
+	return gitCatBlobDirect(obj, repoPath, w)
+}
 
 // Used to support zoekt "preview file" actions.
 // Since we don't want to maintain repoConfig for zoekt

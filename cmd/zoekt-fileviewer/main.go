@@ -33,6 +33,7 @@ const (
 	GitListTagsRoute                      = V2 + "/getAllTagsForZoekt/:parent/:repo/+/"
 	GetSyntaxHighlightedFileForZoektRoute = V2 + "/getSyntaxHighlightedFileForZoekt/:parent/:repo/+/"
 	GitLsTreeRoute                        = V2 + "/getDirectoryTreeForZoekt/:parent/:repo/+/"
+	GitPlainBlobRoute                     = V2 + "/getPlainGitBlob/:parent/:repo/+/"
 )
 
 func main() {
@@ -111,12 +112,8 @@ func (s *Server) setupRoutes() error {
 	s.router.Get(GitListTagsRoute, http.HandlerFunc(s.ServeListAllTagsForZoekt))
 	s.router.Get(GetSyntaxHighlightedFileForZoektRoute, http.HandlerFunc(s.ServeSyntaxHighlightedFileForZoekt))
 	s.router.Get(GitLsTreeRoute, http.HandlerFunc(s.ServeGitLsTreeForZoekt))
+	s.router.Get(GitPlainBlobRoute, http.HandlerFunc(s.HandleFileReq))
 
-	// 	m.Add("GET", "/api/v2/getSyntaxHighlightedFileForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeSyntaxHighlightedFileForZoekt))
-	// 	m.Add("GET", "/api/v2/getDirectoryTreeForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeGitLsTreeForZoekt))
-	// 	m.Add("GET", "/api/v2/getGitLogForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeGitLogForZoekt))
-	// 	m.Add("GET", "/api/v2/getAllBranchesForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeListAllBranchesForZoekt))
-	// 	m.Add("GET", "/api/v2/getAllTagsForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeListAllTagsForZoekt))
 	handler := requestIDMiddleware(logMiddleware(s.router))
 
 	s.server = &http.Server{
@@ -338,12 +335,14 @@ func (s *Server) ServeListAllTagsForZoekt(w http.ResponseWriter, r *http.Request
 	replyJSON(context.Background(), w, 200, tags)
 }
 
-// get all tags, get all branches, getgitlog, getdirectorytreeforzoekt,
-// getsyntaxhighlightedfileforzoekt
+func (s *Server) HandleFileReq(w http.ResponseWriter, r *http.Request) {
+	parent := r.URL.Query().Get(":parent")
+	repo := r.URL.Query().Get(":repo")
+	repoRevAndPath := pat.Tail(GitPlainBlobRoute, r.URL.Path)
+	revision, path := parseRevisionAndPath(repoRevAndPath)
+	repoPath := fmt.Sprintf("%s/%s/%s.git", s.config.ZoektRepoCache, parent, repo)
 
-// 	m.Add("GET", "/api/v2/getSyntaxHighlightedFileForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeSyntaxHighlightedFileForZoekt))
-// 	m.Add("GET", "/api/v2/getDirectoryTreeForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeGitLsTreeForZoekt))
-// 	m.Add("GET", "/api/v2/getGitLogForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeGitLogForZoekt))
-// 	m.Add("GET", "/api/v2/getAllBranchesForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeListAllBranchesForZoekt))
-// 	m.Add("GET", "/api/v2/getAllTagsForZoekt/:parent/:repo/+/", srv.Handler(srv.ServeListAllTagsForZoekt))
-// 	m.Add("GET", "/api/v2/getDirectoryTreeForZoekt/", srv.Handler(srv.TestHandler))
+	if err := GetPlainBlob(path, repoPath, parent+"/"+repo, revision, w); err != nil {
+		http.Error(w, "Failed to fetch git blob", 500)
+	}
+}
